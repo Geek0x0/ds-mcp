@@ -27,7 +27,9 @@ Choose the narrowest sandbox that permits the task:
 - `workspace-write` permits `read_file`, all `shell` calls, and `write_file` when its resolved path stays inside `cwd`. A `write_file` path containing `..` or escaping through a symlink is outside the sandbox.
 - `danger-full-access` treats every built-in tool operation as inside the sandbox.
 
-These sandbox modes are application-layer policy intended to prevent accidental misuse. They are not malicious-actor-proof and do not provide OS-level isolation. In particular, this layer cannot always detect writes performed internally by an allowed shell command that escape the declared sandbox boundary.
+The shell-command allowlist contains `ls`, `cat`, `head`, `tail`, `rg`, `grep`, `find`, `pwd`, `wc`, `stat`, `which`, and `echo`, plus `git status`, `git diff`, `git log`, `git show`, `git branch`, `git blame`, `git rev-parse`, and `git ls-files`.
+
+**Safety: these sandbox modes are application-layer policy intended to prevent accidental misuse. They are not malicious-actor-proof and do not provide OS-level isolation. Reads performed through `read_file` or allowlisted shell commands are not confined to `cwd` at any sandbox level; they can access any path the server process can read. This layer also cannot always detect writes performed internally by an allowed shell command that escape the declared sandbox boundary; in particular, `workspace-write` considers shell calls inside its boundary. Use operating-system isolation when the trust boundary requires it.**
 
 The `approval-policy` determines what happens to operations inside or outside the selected sandbox:
 
@@ -36,7 +38,7 @@ The `approval-policy` determines what happens to operations inside or outside th
 - `on-failure` currently has exactly the same behavior as `on-request`.
 - `never` allows operations inside the sandbox and denies operations outside it without asking.
 
-Approval requests are sent to the MCP client. If approval elicitation is unavailable, the request is denied.
+Approval requests are sent to the MCP client. If approval elicitation is unavailable or unanswered for five minutes, the request is denied.
 
 `cwd` must be an absolute path to an existing directory; a Git worktree root is usually a sensible choice. If omitted, it defaults to the ds-mcp process working directory. `model` defaults to `deepseek-chat`; pass `deepseek-reasoner` when the reasoning model is appropriate.
 

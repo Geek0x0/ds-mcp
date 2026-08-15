@@ -188,12 +188,42 @@ func hasDangerousShellFlag(fields []string) bool {
 			}
 		}
 	case "git":
-		if len(fields) < 2 || (fields[1] != "diff" && fields[1] != "log" && fields[1] != "show") {
+		if len(fields) < 2 {
 			return false
 		}
-		for _, argument := range fields[2:] {
-			if argument == "--output" || strings.HasPrefix(argument, "--output=") {
-				return true
+		if fields[1] == "branch" {
+			allowed := map[string]bool{
+				"-a":             true,
+				"--all":          true,
+				"-r":             true,
+				"--remotes":      true,
+				"-v":             true,
+				"-vv":            true,
+				"--verbose":      true,
+				"-l":             true,
+				"--list":         true,
+				"--show-current": true,
+				"--contains":     true,
+				"--merged":       true,
+				"--no-merged":    true,
+				"--sort":         true,
+				"--format":       true,
+				"--color":        true,
+				"--no-color":     true,
+			}
+			// ponytail: Positional values for --contains, --merged, --no-merged, --sort, and --format are conservatively rejected to prevent branch-name mutations; use an equals form where applicable.
+			for _, argument := range fields[2:] {
+				if !allowed[argument] && !strings.HasPrefix(argument, "--sort=") && !strings.HasPrefix(argument, "--format=") {
+					return true
+				}
+			}
+			return false
+		}
+		if fields[1] == "diff" || fields[1] == "log" || fields[1] == "show" {
+			for _, argument := range fields[2:] {
+				if argument == "--output" || strings.HasPrefix(argument, "--output=") {
+					return true
+				}
 			}
 		}
 	}

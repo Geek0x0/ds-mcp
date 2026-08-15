@@ -21,6 +21,10 @@ func TestIsWhitelistedShell(t *testing.T) {
 		{name: "git diff", command: "git diff --stat", want: true},
 		{name: "git log", command: "git log -5", want: true},
 		{name: "git show", command: "git show HEAD", want: true},
+		{name: "git branch", command: "git branch", want: true},
+		{name: "git branch all", command: "git branch -a", want: true},
+		{name: "git branch verbose", command: "git branch -v", want: true},
+		{name: "git branch show current", command: "git branch --show-current", want: true},
 		{name: "grep", command: "grep -r x .", want: true},
 		{name: "find", command: "find . -name '*.go'", want: true},
 		{name: "working directory", command: "pwd", want: true},
@@ -43,6 +47,10 @@ func TestIsWhitelistedShell(t *testing.T) {
 		{name: "find exec", command: "find . -exec rm -rf {} +", want: false},
 		{name: "ripgrep preprocessor", command: "rg --pre ./evil.sh foo .", want: false},
 		{name: "git diff output file", command: "git diff --output=/tmp/x HEAD", want: false},
+		{name: "git branch force delete", command: "git branch -D main", want: false},
+		{name: "git branch rename", command: "git branch -m old new", want: false},
+		{name: "git branch create", command: "git branch new-branch", want: false},
+		{name: "git branch force move", command: "git branch -f main HEAD~5", want: false},
 		{name: "empty", command: "", want: false},
 	}
 

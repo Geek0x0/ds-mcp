@@ -110,11 +110,13 @@ func Evaluate(sb Sandbox, ap ApprovalPolicy, req Request) (Decision, string) {
 			return Allow, ""
 		}
 		return Deny, reason
-	default:
+	case approvalOnRequest, approvalOnFailure:
 		if inSandbox {
 			return Allow, ""
 		}
 		return AskApproval, reason
+	default:
+		return Deny, fmt.Sprintf("unknown approval policy %q", ap)
 	}
 }
 
@@ -140,9 +142,15 @@ func isWhitelistedShell(command string) bool {
 		}
 		matchedSegment = true
 		if simpleAllowed[fields[0]] {
+			if hasDangerousShellFlag(fields) {
+				return false
+			}
 			continue
 		}
 		if fields[0] == "git" && len(fields) > 1 && gitAllowed[fields[1]] {
+			if hasDangerousShellFlag(fields) {
+				return false
+			}
 			continue
 		}
 		return false
@@ -151,7 +159,56 @@ func isWhitelistedShell(command string) bool {
 	return matchedSegment
 }
 
+func hasDangerousShellFlag(fields []string) bool {
+	// ponytail: A command-name and dangerous-flag denylist is not an exhaustive command-line parser; use per-command flag allowlists or OS-level sandboxing to remove this ceiling.
+	switch fields[0] {
+	case "find":
+		denied := map[string]bool{
+			"-exec":    true,
+			"-execdir": true,
+			"-ok":      true,
+			"-okdir":   true,
+			"-delete":  true,
+			"-fprintf": true,
+			"-fls":     true,
+			"-fprint":  true,
+			"-fprint0": true,
+		}
+		for _, argument := range fields[1:] {
+			if denied[argument] {
+				return true
+			}
+		}
+	case "rg", "grep":
+		for _, argument := range fields[1:] {
+			if argument == "--pre" || argument == "--pre-glob" || argument == "--hostname-bin" ||
+				strings.HasPrefix(argument, "--pre=") || strings.HasPrefix(argument, "--pre-glob=") ||
+				strings.HasPrefix(argument, "--hostname-bin=") {
+				return true
+			}
+		}
+	case "git":
+		if len(fields) < 2 || (fields[1] != "diff" && fields[1] != "log" && fields[1] != "show") {
+			return false
+		}
+		for _, argument := range fields[2:] {
+			if argument == "--output" || strings.HasPrefix(argument, "--output=") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func pathInside(cwd, target string) (bool, string) {
+	for _, component := range strings.Split(filepath.ToSlash(target), "/") {
+		if component == ".." {
+			// ponytail: Rejecting every parent-directory component is conservative; resolving each component with Lstat would permit legitimate uses without reopening symlink escapes.
+			return false, fmt.Sprintf("target %q contains a parent-directory component", target)
+		}
+	}
+
 	cwdAbsolute, err := filepath.Abs(cwd)
 	if err != nil {
 		return false, fmt.Sprintf("resolve working directory %q: %v", cwd, err)

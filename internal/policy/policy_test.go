@@ -39,6 +39,10 @@ func TestIsWhitelistedShell(t *testing.T) {
 		{name: "mixed pipeline", command: "cat f | tee out", want: false},
 		{name: "git write subcommand", command: "git push", want: false},
 		{name: "leading assignment", command: "FOO=1 ls", want: false},
+		{name: "find delete", command: "find . -delete", want: false},
+		{name: "find exec", command: "find . -exec rm -rf {} +", want: false},
+		{name: "ripgrep preprocessor", command: "rg --pre ./evil.sh foo .", want: false},
+		{name: "git diff output file", command: "git diff --output=/tmp/x HEAD", want: false},
 		{name: "empty", command: "", want: false},
 	}
 
@@ -79,6 +83,17 @@ func TestPathInside(t *testing.T) {
 		t.Fatalf("create file symlink: %v", err)
 	}
 
+	insideDirectory := filepath.Join(cwd, "inside-directory")
+	if err := os.Mkdir(insideDirectory, 0o700); err != nil {
+		t.Fatalf("create inside directory: %v", err)
+	}
+	insideDirectoryLink := filepath.Join(cwd, "inside-directory-link")
+	if err := os.Symlink(insideDirectory, insideDirectoryLink); err != nil {
+		t.Fatalf("create inside directory symlink: %v", err)
+	}
+
+	dotDotEscape := directoryLink + string(filepath.Separator) + ".." + string(filepath.Separator) + "evil"
+
 	tests := []struct {
 		name   string
 		target string
@@ -88,7 +103,9 @@ func TestPathInside(t *testing.T) {
 		{name: "absolute path inside cwd", target: insideFile, want: true},
 		{name: "relative path outside cwd", target: "../outside.txt", want: false},
 		{name: "file below symlinked directory", target: filepath.Join(directoryLink, "escaped.txt"), want: false},
+		{name: "symlink followed by parent directory", target: dotDotEscape, want: false},
 		{name: "not yet existing nested path", target: filepath.Join("a", "b", "c", "new.txt"), want: true},
+		{name: "new file below inside symlinked directory", target: filepath.Join(insideDirectoryLink, "newfile.txt"), want: true},
 		{name: "existing symlink target", target: fileLink, want: false},
 	}
 
@@ -122,7 +139,6 @@ func TestEvaluate(t *testing.T) {
 		approval     ApprovalPolicy
 		request      Request
 		wantDecision Decision
-		wantReason   bool
 	}{
 		{
 			name:         "read-only on-request read file",
@@ -158,7 +174,6 @@ func TestEvaluate(t *testing.T) {
 			approval:     ApprovalPolicy("never"),
 			request:      Request{Tool: "shell", Command: "rm x", Cwd: cwd},
 			wantDecision: Deny,
-			wantReason:   true,
 		},
 		{
 			name:         "read-only never write file",
@@ -244,6 +259,13 @@ func TestEvaluate(t *testing.T) {
 			request:      Request{Tool: "shell", Command: "rm x", Cwd: cwd},
 			wantDecision: AskApproval,
 		},
+		{
+			name:         "unknown approval policy fails closed",
+			sandbox:      Sandbox("workspace-write"),
+			approval:     ApprovalPolicy("bogus"),
+			request:      Request{Tool: "read_file", Path: inside, Cwd: cwd},
+			wantDecision: Deny,
+		},
 	}
 
 	for _, tt := range tests {
@@ -253,8 +275,11 @@ func TestEvaluate(t *testing.T) {
 			if gotDecision != tt.wantDecision {
 				t.Fatalf("Evaluate(%q, %q, %+v) = (%v, %q), want decision %v", tt.sandbox, tt.approval, tt.request, gotDecision, reason, tt.wantDecision)
 			}
-			if tt.wantReason && reason == "" {
-				t.Fatalf("Evaluate(%q, %q, %+v) returned no reason", tt.sandbox, tt.approval, tt.request)
+			if gotDecision == Allow && reason != "" {
+				t.Fatalf("Evaluate(%q, %q, %+v) returned reason %q for an allowed request", tt.sandbox, tt.approval, tt.request, reason)
+			}
+			if gotDecision != Allow && reason == "" {
+				t.Fatalf("Evaluate(%q, %q, %+v) returned no reason for decision %v", tt.sandbox, tt.approval, tt.request, gotDecision)
 			}
 		})
 	}

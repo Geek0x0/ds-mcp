@@ -1,0 +1,13 @@
+{
+  "name": "ds-mcp",
+  "owner": {
+    "name": "Kaidi Shi"
+  },
+  "plugins": [
+    {
+      "name": "deepseek",
+      "source": "./",
+      "description": "DeepSeek-powered coding agent exposed as MCP tools (deepseek / deepseek-reply)"
+    }
+  ]
+}

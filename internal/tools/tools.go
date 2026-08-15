@@ -57,17 +57,21 @@ func RunShell(ctx context.Context, cwd, command string, timeout time.Duration) (
 	var buf limitedBuffer
 	cmd := exec.CommandContext(runCtx, "bash", "-lc", command)
 	cmd.Dir = cwd
-	// ponytail: Linux process-group signaling keeps descendants from surviving a timeout;
-	// supporting other operating systems requires a platform-specific cancellation implementation.
+	// ponytail: Linux process-group signaling kills ordinary descendants, and WaitDelay bounds
+	// inherited-pipe waits. A descendant that escapes the group can survive without being reported.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	cmd.WaitDelay = time.Second
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 
 	runErr := cmd.Run()
 	out = buf.String()
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		return out, 0, nil
+	}
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return out, -1, fmt.Errorf("command timed out after %s", timeout)
 	}

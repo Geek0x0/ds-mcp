@@ -2,9 +2,12 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -84,6 +87,71 @@ func TestRunShell(t *testing.T) {
 		}
 	})
 
+	t.Run("returns success when a background process holds the pipe", func(t *testing.T) {
+		cwd := t.TempDir()
+		command := "sleep 5 & echo $! > child.pid; echo done"
+
+		start := time.Now()
+		out, exitCode, err := RunShell(context.Background(), cwd, command, 200*time.Millisecond)
+		elapsed := time.Since(start)
+
+		childPID := readPIDFile(t, filepath.Join(cwd, "child.pid"))
+		t.Cleanup(func() {
+			if killErr := syscall.Kill(childPID, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+				t.Errorf("kill background process %d: %v", childPID, killErr)
+			}
+		})
+
+		if err != nil {
+			t.Fatalf("RunShell() error = %v", err)
+		}
+		if exitCode != 0 {
+			t.Errorf("RunShell() exitCode = %d, want 0", exitCode)
+		}
+		if !strings.Contains(out, "done") {
+			t.Errorf("RunShell() output = %q, want done", out)
+		}
+		if elapsed >= 2*time.Second {
+			t.Errorf("RunShell() elapsed = %v, want less than 2s", elapsed)
+		}
+		if killErr := syscall.Kill(childPID, 0); killErr != nil {
+			t.Errorf("background process %d did not outlive bash: %v", childPID, killErr)
+		}
+	})
+
+	t.Run("kills a grandchild and bounds inherited pipe wait", func(t *testing.T) {
+		cwd := t.TempDir()
+		command := "sleep 5 & echo $! > child.pid; setsid sleep 5 & echo $! > escaped.pid; wait"
+
+		start := time.Now()
+		out, exitCode, err := RunShell(context.Background(), cwd, command, 200*time.Millisecond)
+		elapsed := time.Since(start)
+
+		childPID := readPIDFile(t, filepath.Join(cwd, "child.pid"))
+		escapedPID := readPIDFile(t, filepath.Join(cwd, "escaped.pid"))
+		t.Cleanup(func() {
+			if killErr := syscall.Kill(escapedPID, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+				t.Errorf("kill escaped descendant %d: %v", escapedPID, killErr)
+			}
+		})
+
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("RunShell() error = %v, want timed out error", err)
+		}
+		if exitCode != -1 {
+			t.Errorf("RunShell() exitCode = %d, want -1", exitCode)
+		}
+		if out != "" {
+			t.Errorf("RunShell() output = %q, want empty", out)
+		}
+		if elapsed >= 2*time.Second {
+			t.Errorf("RunShell() elapsed = %v, want less than 2s", elapsed)
+		}
+		if !waitForProcessExit(childPID, time.Second) {
+			t.Errorf("process-group grandchild %d is still alive", childPID)
+		}
+	})
+
 	t.Run("truncates output", func(t *testing.T) {
 		out, exitCode, err := RunShell(
 			context.Background(),
@@ -105,6 +173,34 @@ func TestRunShell(t *testing.T) {
 			t.Errorf("RunShell() output suffix = %q, want %q", out[len(out)-len(marker):], marker)
 		}
 	})
+}
+
+func readPIDFile(t *testing.T, path string) int {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse PID from %q: %v", path, err)
+	}
+	return pid
+}
+
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestReadFile(t *testing.T) {

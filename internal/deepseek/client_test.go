@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
@@ -98,6 +101,61 @@ func TestChatTurnReconstructsToolCallsByIndex(t *testing.T) {
 	}
 }
 
+func TestChatTurnFallsBackToChunkPositionForIndexlessToolCall(t *testing.T) {
+	server := newToolCallStream(t, openai.ToolCall{
+		ID:   "call_indexless",
+		Type: openai.ToolTypeFunction,
+		Function: openai.FunctionCall{
+			Name:      "get_weather",
+			Arguments: `{"city":"Vancouver"}`,
+		},
+	})
+	client := newTestClient(server.URL)
+
+	result, err := client.ChatTurn(context.Background(), chatRequest(), func(string) {})
+	if err != nil {
+		t.Fatalf("ChatTurn() error = %v", err)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(result.ToolCalls))
+	}
+
+	got := result.ToolCalls[0]
+	if got.ID != "call_indexless" {
+		t.Errorf("ToolCalls[0].ID = %q, want %q", got.ID, "call_indexless")
+	}
+	if got.Function.Name != "get_weather" {
+		t.Errorf("ToolCalls[0].Function.Name = %q, want %q", got.Function.Name, "get_weather")
+	}
+	if got.Function.Arguments != `{"city":"Vancouver"}` {
+		t.Errorf("ToolCalls[0].Function.Arguments = %q, want valid reconstructed arguments", got.Function.Arguments)
+	}
+}
+
+func TestChatTurnDefaultsMissingToolCallTypeToFunction(t *testing.T) {
+	index := 0
+	server := newToolCallStream(t, openai.ToolCall{
+		Index: &index,
+		ID:    "call_typeless",
+		Function: openai.FunctionCall{
+			Name:      "get_time",
+			Arguments: `{"timezone":"America/Vancouver"}`,
+		},
+	})
+	client := newTestClient(server.URL)
+
+	result, err := client.ChatTurn(context.Background(), chatRequest(), func(string) {})
+	if err != nil {
+		t.Fatalf("ChatTurn() error = %v", err)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].Type != openai.ToolTypeFunction {
+		t.Errorf("ToolCalls[0].Type = %q, want %q", result.ToolCalls[0].Type, openai.ToolTypeFunction)
+	}
+}
+
 func TestChatTurnRetriesRetryableStatusesThenSucceeds(t *testing.T) {
 	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{
 		{Status: 500},
@@ -153,14 +211,33 @@ func TestChatTurnStopsBackoffWhenContextIsCanceled(t *testing.T) {
 	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{Status: 500}})
 	client := deepseek.New("test-key", fake.URL)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	client.Backoff = func(int) time.Duration {
-		cancel()
+		time.AfterFunc(50*time.Millisecond, cancel)
 		return time.Hour
 	}
 
-	result, err := client.ChatTurn(ctx, chatRequest(), func(string) {})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("ChatTurn() = (%#v, %v), want context.Canceled", result, err)
+	type outcome struct {
+		result *deepseek.TurnResult
+		err    error
+	}
+	resultCh := make(chan outcome, 1)
+	started := time.Now()
+	go func() {
+		result, err := client.ChatTurn(ctx, chatRequest(), func(string) {})
+		resultCh <- outcome{result: result, err: err}
+	}()
+
+	select {
+	case got := <-resultCh:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("ChatTurn() = (%#v, %v), want context.Canceled", got.result, got.err)
+		}
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			t.Errorf("ChatTurn() took %v, want cancellation well before the one-hour backoff", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ChatTurn() did not stop promptly when context was canceled during backoff")
 	}
 	if fake.RequestCount() != 1 {
 		t.Errorf("RequestCount() = %d, want 1", fake.RequestCount())
@@ -182,4 +259,35 @@ func chatRequest() openai.ChatCompletionRequest {
 			Content: "hello",
 		}},
 	}
+}
+
+func newToolCallStream(t *testing.T, call openai.ToolCall) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+
+		payload, err := json.Marshal(openai.ChatCompletionStreamResponse{
+			Choices: []openai.ChatCompletionStreamChoice{{
+				Delta: openai.ChatCompletionStreamChoiceDelta{
+					ToolCalls: []openai.ToolCall{call},
+				},
+			}},
+		})
+		if err != nil {
+			t.Errorf("marshal stream response: %v", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", payload); err != nil {
+			t.Errorf("write stream response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return server
 }

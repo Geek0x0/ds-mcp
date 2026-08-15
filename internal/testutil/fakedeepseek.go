@@ -18,6 +18,8 @@ type FakeToolCall struct {
 	Args string
 }
 
+// FakeTurn scripts either a text reply or a tool-call batch. Text and
+// ToolCalls are mutually exclusive.
 type FakeTurn struct {
 	Status    int
 	Text      string
@@ -35,6 +37,11 @@ type FakeDeepSeek struct {
 
 func NewFakeDeepSeek(t testing.TB, turns []FakeTurn) *FakeDeepSeek {
 	t.Helper()
+	for i, turn := range turns {
+		if turn.Text != "" && len(turn.ToolCalls) > 0 {
+			t.Fatalf("FakeTurn %d: Text and ToolCalls are mutually exclusive", i)
+		}
+	}
 
 	fake := &FakeDeepSeek{
 		t:     t,

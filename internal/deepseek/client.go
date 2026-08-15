@@ -82,17 +82,27 @@ func (c *Client) ChatTurn(
 				}
 			}
 
-			for _, entry := range delta.ToolCalls {
-				if entry.Index == nil {
-					continue
+			for chunkPosition, entry := range delta.ToolCalls {
+				index := chunkPosition
+				if entry.Index != nil {
+					index = *entry.Index
+				} else {
+					// ponytail: Chunk position recovers the common single-call case
+					// when a provider omits Index. Selectively omitted indices in a
+					// multi-call batch can still misassign continuations; robust
+					// recovery would require provider-supplied correlation metadata.
 				}
 
-				index := *entry.Index
 				call, ok := toolCallsByIndex[index]
 				if !ok {
+					toolType := entry.Type
+					if toolType == "" {
+						toolType = openai.ToolTypeFunction
+					}
+
 					toolCallsByIndex[index] = &openai.ToolCall{
 						ID:   entry.ID,
-						Type: entry.Type,
+						Type: toolType,
 						Function: openai.FunctionCall{
 							Name:      entry.Function.Name,
 							Arguments: entry.Function.Arguments,

@@ -1,0 +1,186 @@
+package deepseek
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	openai "github.com/sashabaranov/go-openai"
+)
+
+type TurnResult struct {
+	Content   string
+	ToolCalls []openai.ToolCall
+	Usage     *openai.Usage
+}
+
+type Client struct {
+	oai     *openai.Client
+	Backoff func(attempt int) time.Duration
+}
+
+func New(apiKey, baseURL string) *Client {
+	cfg := openai.DefaultConfig(apiKey)
+	cfg.BaseURL = baseURL
+
+	return &Client{
+		oai:     openai.NewClientWithConfig(cfg),
+		Backoff: defaultBackoff,
+	}
+}
+
+func defaultBackoff(attempt int) time.Duration {
+	return time.Duration(1<<uint(attempt)) * time.Second
+}
+
+func (c *Client) ChatTurn(
+	ctx context.Context,
+	req openai.ChatCompletionRequest,
+	onDelta func(string),
+) (*TurnResult, error) {
+	streamRequest := req
+	streamRequest.Stream = true
+	streamRequest.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
+
+	// ponytail: Retries cover stream setup only. A mid-stream receive error fails
+	// the turn; callers can issue a fresh turn, while resumption would require
+	// protocol-level replay support.
+	stream, err := c.openStreamWithRetry(ctx, streamRequest)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	var content strings.Builder
+	toolCallsByIndex := make(map[int]*openai.ToolCall)
+	var usage *openai.Usage
+
+	for {
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if response.Usage != nil {
+			latestUsage := *response.Usage
+			usage = &latestUsage
+		}
+
+		for _, choice := range response.Choices {
+			delta := choice.Delta
+			if delta.Content != "" {
+				content.WriteString(delta.Content)
+				if onDelta != nil {
+					onDelta(delta.Content)
+				}
+			}
+
+			for _, entry := range delta.ToolCalls {
+				if entry.Index == nil {
+					continue
+				}
+
+				index := *entry.Index
+				call, ok := toolCallsByIndex[index]
+				if !ok {
+					toolCallsByIndex[index] = &openai.ToolCall{
+						ID:   entry.ID,
+						Type: entry.Type,
+						Function: openai.FunctionCall{
+							Name:      entry.Function.Name,
+							Arguments: entry.Function.Arguments,
+						},
+					}
+					continue
+				}
+
+				call.Function.Arguments += entry.Function.Arguments
+			}
+		}
+	}
+
+	return &TurnResult{
+		Content:   content.String(),
+		ToolCalls: sortedToolCalls(toolCallsByIndex),
+		Usage:     usage,
+	}, nil
+}
+
+func (c *Client) openStreamWithRetry(
+	ctx context.Context,
+	req openai.ChatCompletionRequest,
+) (*openai.ChatCompletionStream, error) {
+	const maxAttempts = 4
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		stream, err := c.oai.CreateChatCompletionStream(ctx, req)
+		if err == nil {
+			return stream, nil
+		}
+		if attempt == maxAttempts-1 || !isRetryable(err) {
+			return nil, err
+		}
+
+		if err := waitForBackoff(ctx, c.Backoff(attempt)); err != nil {
+			return nil, err
+		}
+	}
+
+	panic("unreachable")
+}
+
+func isRetryable(err error) bool {
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) && isRetryableStatus(apiErr.HTTPStatusCode) {
+		return true
+	}
+
+	var requestErr *openai.RequestError
+	return errors.As(err, &requestErr) && isRetryableStatus(requestErr.HTTPStatusCode)
+}
+
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
+func waitForBackoff(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func sortedToolCalls(callsByIndex map[int]*openai.ToolCall) []openai.ToolCall {
+	if len(callsByIndex) == 0 {
+		return nil
+	}
+
+	indices := make([]int, 0, len(callsByIndex))
+	for index := range callsByIndex {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+
+	calls := make([]openai.ToolCall, 0, len(indices))
+	for _, index := range indices {
+		calls = append(calls, *callsByIndex[index])
+	}
+
+	return calls
+}

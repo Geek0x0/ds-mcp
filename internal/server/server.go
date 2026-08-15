@@ -16,6 +16,8 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+const maxConfiguredTurns = 100000
+
 type Server struct {
 	mcp    *mcpserver.MCPServer
 	mgr    *agent.Manager
@@ -24,7 +26,12 @@ type Server struct {
 
 func New(client agent.ChatClient, version string) *Server {
 	s := &Server{mgr: agent.NewManager()}
-	s.mcp = mcpserver.NewMCPServer("ds-mcp", version, mcpserver.WithToolCapabilities(false))
+	s.mcp = mcpserver.NewMCPServer(
+		"ds-mcp",
+		version,
+		mcpserver.WithToolCapabilities(false),
+		mcpserver.WithRecovery(),
+	)
 	s.runner = &agent.Runner{Client: client, Emitter: s, Approver: s}
 	s.mcp.AddTool(deepseekTool(), s.handleDeepseek)
 	s.mcp.AddTool(replyTool(), s.handleReply)
@@ -70,7 +77,7 @@ func deepseekTool() mcp.Tool {
 		),
 		mcp.WithObject(
 			"config",
-			mcp.Description("loose config map; recognized key: max_turns (number); unknown keys are silently ignored"),
+			mcp.Description("loose config map; recognized key: max_turns (number from 1 to 100000); unknown keys and out-of-range values are silently ignored"),
 		),
 	)
 }
@@ -97,6 +104,7 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	if err != nil {
 		return mcp.NewToolResultError("prompt is required: " + err.Error()), nil
 	}
+	arguments := req.GetArguments()
 
 	sandboxValue := req.GetString("sandbox", "read-only")
 	sandbox, err := policy.ParseSandbox(sandboxValue)
@@ -116,7 +124,14 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		)), nil
 	}
 
-	cwd := req.GetString("cwd", "")
+	var cwd string
+	if raw, present := arguments["cwd"]; present {
+		var ok bool
+		cwd, ok = raw.(string)
+		if !ok {
+			return mcp.NewToolResultError(`argument "cwd" must be a string`), nil
+		}
+	}
 	if cwd == "" {
 		cwd, err = os.Getwd()
 		if err != nil {
@@ -146,8 +161,8 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	maxTurns := 0
-	if config, ok := req.GetArguments()["config"].(map[string]any); ok {
-		if value, ok := config["max_turns"].(float64); ok && value > 0 {
+	if config, ok := arguments["config"].(map[string]any); ok {
+		if value, ok := config["max_turns"].(float64); ok && value > 0 && value <= maxConfiguredTurns {
 			maxTurns = int(value)
 		}
 	}
@@ -181,7 +196,11 @@ func (s *Server) handleReply(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 	text, err := s.runner.Run(ctx, sess, prompt)
 	if errors.Is(err, agent.ErrBusy) {
-		return mcp.NewToolResultError("thread " + threadID + " is busy with another call"), nil
+		return resultWithThreadID(
+			threadID,
+			"",
+			fmt.Errorf("thread %s is busy with another call", threadID),
+		), nil
 	}
 	return resultWithThreadID(threadID, text, err), nil
 }

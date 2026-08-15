@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 	"ds-mcp/internal/deepseek"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -86,6 +88,35 @@ type emitterFunc func(context.Context, string, map[string]any)
 
 func (f emitterFunc) Emit(ctx context.Context, threadID string, msg map[string]any) {
 	f(ctx, threadID, msg)
+}
+
+type fakeElicitationSession struct {
+	result        *mcp.ElicitationResult
+	err           error
+	requests      []mcp.ElicitationRequest
+	notifications chan mcp.JSONRPCNotification
+}
+
+func (s *fakeElicitationSession) Initialize() {}
+
+func (s *fakeElicitationSession) Initialized() bool {
+	return true
+}
+
+func (s *fakeElicitationSession) NotificationChannel() chan<- mcp.JSONRPCNotification {
+	return s.notifications
+}
+
+func (s *fakeElicitationSession) SessionID() string {
+	return "test-session"
+}
+
+func (s *fakeElicitationSession) RequestElicitation(
+	_ context.Context,
+	request mcp.ElicitationRequest,
+) (*mcp.ElicitationResult, error) {
+	s.requests = append(s.requests, request)
+	return s.result, s.err
 }
 
 func TestToolDeclarations(t *testing.T) {
@@ -175,6 +206,11 @@ func TestHandleDeepseekValidation(t *testing.T) {
 			name:     "relative cwd",
 			args:     map[string]any{"prompt": "hello", "cwd": "relative/path"},
 			contains: []string{"cwd", "absolute"},
+		},
+		{
+			name:     "non-string cwd",
+			args:     map[string]any{"prompt": "hello", "cwd": 123},
+			contains: []string{"cwd", "string"},
 		},
 		{
 			name:     "nonexistent cwd",
@@ -342,6 +378,9 @@ func TestHandleReplyBusy(t *testing.T) {
 	if !busy.IsError || !strings.Contains(toolResultText(t, busy), "busy") {
 		t.Fatalf("handleReply() result = %#v, want busy tool error", busy)
 	}
+	if got := toolResultThreadID(t, busy); got != threadID {
+		t.Fatalf("busy result threadId = %q, want %q", got, threadID)
+	}
 
 	unblockClient()
 	select {
@@ -379,6 +418,88 @@ func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
 	}
 	if threadID := toolResultThreadID(t, result); threadID == "" {
 		t.Fatal("turn-limit result has empty threadId")
+	}
+}
+
+func TestHandleDeepseekIgnoresExcessiveMaxTurns(t *testing.T) {
+	toolTurn := stubTurn{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{
+		toolCall("call-forever", "unknown_tool", `{}`),
+	}}}
+	turns := make([]stubTurn, agent.DefaultMaxTurns+1)
+	for i := 0; i < agent.DefaultMaxTurns; i++ {
+		turns[i] = toolTurn
+	}
+	turns[agent.DefaultMaxTurns] = stubTurn{result: &deepseek.TurnResult{Content: "should not be reached"}}
+	client := &stubChatClient{turns: turns}
+	s := New(client, "test")
+
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "use a bounded turn count",
+		"cwd":    t.TempDir(),
+		"config": map[string]any{"max_turns": float64(100001)},
+	}))
+	if err != nil {
+		t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+	}
+	if !result.IsError {
+		t.Fatalf("handleDeepseek() result = %#v, want default turn-limit error", result)
+	}
+	want := fmt.Sprintf("turn limit reached (%d)", agent.DefaultMaxTurns)
+	if text := toolResultText(t, result); !strings.Contains(text, want) {
+		t.Fatalf("result text = %q, want it to contain %q", text, want)
+	}
+}
+
+func TestApproveElicitationActions(t *testing.T) {
+	tests := []struct {
+		name   string
+		action mcp.ElicitationResponseAction
+		err    error
+		want   bool
+	}{
+		{name: "accept", action: mcp.ElicitationResponseActionAccept, want: true},
+		{name: "decline", action: mcp.ElicitationResponseActionDecline, want: false},
+		{name: "cancel", action: mcp.ElicitationResponseActionCancel, want: false},
+		{name: "error", err: errors.New("elicitation failed"), want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := New(&stubChatClient{}, "test")
+			var result *mcp.ElicitationResult
+			if test.err == nil {
+				result = &mcp.ElicitationResult{
+					ElicitationResponse: mcp.ElicitationResponse{Action: test.action},
+				}
+			}
+			fakeSession := &fakeElicitationSession{
+				result:        result,
+				err:           test.err,
+				notifications: make(chan mcp.JSONRPCNotification, 1),
+			}
+			ctx := s.mcp.WithContext(context.Background(), fakeSession)
+
+			got := s.Approve(ctx, "thread-1", agent.ApprovalRequest{
+				Tool:    "shell",
+				Command: "echo hello",
+				Reason:  "test approval",
+			})
+			if got != test.want {
+				t.Fatalf("Approve() = %v, want %v", got, test.want)
+			}
+			if len(fakeSession.requests) != 1 {
+				t.Fatalf("elicitation request count = %d, want 1", len(fakeSession.requests))
+			}
+			request := fakeSession.requests[0]
+			for _, want := range []string{"thread-1", "shell", "echo hello", "test approval"} {
+				if !strings.Contains(request.Params.Message, want) {
+					t.Errorf("elicitation message = %q, want it to contain %q", request.Params.Message, want)
+				}
+			}
+			if request.Params.RequestedSchema == nil {
+				t.Fatal("elicitation request has nil RequestedSchema")
+			}
+		})
 	}
 }
 
@@ -494,3 +615,4 @@ func toolMessageContent(t *testing.T, messages []openai.ChatCompletionMessage, c
 }
 
 var _ agent.ChatClient = (*stubChatClient)(nil)
+var _ mcpserver.SessionWithElicitation = (*fakeElicitationSession)(nil)

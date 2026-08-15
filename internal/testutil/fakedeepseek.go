@@ -1,5 +1,10 @@
 package testutil
 
+// ponytail: Go's default same-package coverage attribution makes this shared test
+// infrastructure read near-zero because internal/deepseek and internal/agent tests
+// exercise it. Use -coverpkg=./... for a direct read, or exclude internal/testutil
+// from the aggregate when enforcing a same-package coverage threshold.
+
 import (
 	"encoding/json"
 	"fmt"

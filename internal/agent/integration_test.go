@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,81 @@ func TestAgentLoopNormalCompletion(t *testing.T) {
 	}
 	if !hasTokenCount(events, 12) {
 		t.Fatalf("events = %#v, want token_count with total_tokens 12", events)
+	}
+}
+
+func TestAgentLoopWriteFileExecution(t *testing.T) {
+	const (
+		callID       = "call-write"
+		relativePath = "nested/output.txt"
+		content      = "written by the agent\n"
+	)
+
+	cwd := t.TempDir()
+	turns := []testutil.FakeTurn{
+		{ToolCalls: []testutil.FakeToolCall{{
+			ID:   callID,
+			Name: "write_file",
+			Args: `{"path":"nested/output.txt","content":"written by the agent\n"}`,
+		}}},
+		{Text: "done"},
+	}
+	runner, session, emitter, fake := newRig(t, turns, agent.Options{
+		Cwd:      cwd,
+		Sandbox:  policy.Sandbox("workspace-write"),
+		Approval: policy.ApprovalPolicy("never"),
+	}, true)
+
+	got, err := runner.Run(context.Background(), session, "write the output file")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "done" {
+		t.Fatalf("Run() result = %q, want %q", got, "done")
+	}
+
+	written, err := os.ReadFile(filepath.Join(cwd, relativePath))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(written) != content {
+		t.Fatalf("written content = %q, want %q", written, content)
+	}
+
+	toolMessage := lastRequestMessage(t, fake, 1)
+	if toolMessage["role"] != "tool" {
+		t.Fatalf("last message role = %#v, want tool", toolMessage["role"])
+	}
+	wantToolContent := fmt.Sprintf("wrote %d bytes to %s", len(content), relativePath)
+	if toolMessage["content"] != wantToolContent {
+		t.Fatalf("last tool message content = %#v, want %q", toolMessage["content"], wantToolContent)
+	}
+
+	events := emitter.recordedEvents()
+	beginIndex, endIndex := -1, -1
+	for i, event := range events {
+		switch event["type"] {
+		case "exec_command_begin":
+			if event["call_id"] == callID {
+				beginIndex = i
+				if event["tool"] != "write_file" || event["path"] != relativePath {
+					t.Fatalf("begin event = %#v", event)
+				}
+			}
+		case "exec_command_end":
+			if event["call_id"] == callID {
+				endIndex = i
+				if event["tool"] != "write_file" {
+					t.Fatalf("end event = %#v", event)
+				}
+				if _, ok := event["error"]; ok {
+					t.Fatalf("successful write_file end event unexpectedly contains error: %#v", event)
+				}
+			}
+		}
+	}
+	if beginIndex < 0 || endIndex != beginIndex+1 {
+		t.Fatalf("event types = %v, want adjacent write_file begin/end pair", eventTypes(t, events))
 	}
 }
 

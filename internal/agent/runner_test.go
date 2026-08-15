@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -80,6 +82,25 @@ func (c *stubClient) recordedRequests() []openai.ChatCompletionRequest {
 type recEmitter struct {
 	mu     sync.Mutex
 	events []map[string]any
+}
+
+type panicOnceEmitter struct {
+	recorder  *recEmitter
+	panicType string
+	once      sync.Once
+}
+
+func (e *panicOnceEmitter) Emit(ctx context.Context, threadID string, msg map[string]any) {
+	e.recorder.Emit(ctx, threadID, msg)
+	if msg["type"] != e.panicType {
+		return
+	}
+
+	shouldPanic := false
+	e.once.Do(func() { shouldPanic = true })
+	if shouldPanic {
+		panic("emitter boom")
+	}
 }
 
 func (e *recEmitter) Emit(_ context.Context, _ string, msg map[string]any) {
@@ -208,6 +229,37 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 	}
 }
 
+func TestRunnerEmptyFileResultHasNonEmptyToolContent(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "empty.txt"), nil, 0o644); err != nil {
+		t.Fatalf("create empty file: %v", err)
+	}
+
+	call := toolCall("call-empty", "read_file", `{"path":"empty.txt"}`)
+	client := &stubClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &deepseek.TurnResult{Content: "empty file handled"}},
+	}}
+	session := newTestSession(t, Options{
+		Cwd:      cwd,
+		Sandbox:  policy.Sandbox("workspace-write"),
+		Approval: policy.ApprovalPolicy("never"),
+	})
+	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+
+	if _, err := runner.Run(context.Background(), session, "read empty.txt"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	requests := client.recordedRequests()
+	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
+	if toolMessage.Content == "" {
+		t.Fatal("empty file produced a tool message with empty Content")
+	}
+	if toolMessage.Content != "(empty output)" {
+		t.Fatalf("empty file tool result = %q, want %q", toolMessage.Content, "(empty output)")
+	}
+}
+
 func TestRunnerApprovalDenied(t *testing.T) {
 	const justification = "the requested change needs a file write"
 	call := toolCall("call-write", "write_file", `{"path":"out.txt","content":"hello","justification":"`+justification+`"}`)
@@ -242,11 +294,72 @@ func TestRunnerApprovalDenied(t *testing.T) {
 	if len(approvalRequests) != 1 {
 		t.Fatalf("approval request count = %d, want 1", len(approvalRequests))
 	}
-	if approvalRequests[0].Reason != justification {
-		t.Fatalf("approval reason = %q, want %q", approvalRequests[0].Reason, justification)
+	if !strings.Contains(approvalRequests[0].Reason, "read-only sandbox") ||
+		!strings.Contains(approvalRequests[0].Reason, justification) {
+		t.Fatalf("approval reason = %q, want policy reason and justification %q", approvalRequests[0].Reason, justification)
 	}
 	if approvalRequests[0].Tool != "write_file" || approvalRequests[0].Path != "out.txt" {
 		t.Fatalf("approval request = %#v", approvalRequests[0])
+	}
+}
+
+func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
+	call := toolCall("call-panic", "shell", `{"command":"echo should-not-run"}`)
+	afterPanicCall := toolCall("call-after-panic", "shell", `{"command":"echo after-panic"}`)
+	client := &stubClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call, afterPanicCall}}},
+		{result: &deepseek.TurnResult{Content: "recovered"}},
+	}}
+	recorder := &recEmitter{}
+	emitter := &panicOnceEmitter{recorder: recorder, panicType: "exec_command_begin"}
+	session := newTestSession(t, Options{
+		Cwd:      t.TempDir(),
+		Sandbox:  policy.Sandbox("workspace-write"),
+		Approval: policy.ApprovalPolicy("never"),
+	})
+	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+
+	got, err := runner.Run(context.Background(), session, "trigger a tool panic")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "recovered" {
+		t.Fatalf("Run() result = %q, want %q", got, "recovered")
+	}
+
+	requests := client.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
+	if !strings.Contains(toolMessage.Content, "tool execution panicked") ||
+		!strings.Contains(toolMessage.Content, "emitter boom") {
+		t.Fatalf("panic tool result = %q", toolMessage.Content)
+	}
+	afterPanicMessage := findToolMessage(t, requests[1].Messages, afterPanicCall.ID)
+	if !strings.Contains(afterPanicMessage.Content, "after-panic") {
+		t.Fatalf("post-panic tool result = %q", afterPanicMessage.Content)
+	}
+	assertCompleteToolHistory(t, requests[1].Messages)
+
+	events := recorder.recordedEvents()
+	if gotTypes := eventTypes(t, events); !reflect.DeepEqual(gotTypes, []string{
+		"task_started",
+		"exec_command_begin",
+		"exec_command_end",
+		"exec_command_begin",
+		"exec_command_end",
+		"agent_message",
+		"task_complete",
+	}) {
+		t.Fatalf("event types = %v", gotTypes)
+	}
+	end := events[2]
+	if end["call_id"] != call.ID || end["tool"] != "shell" || end["exit_code"] != -1 {
+		t.Fatalf("panic end event = %#v", end)
+	}
+	if _, ok := end["error"]; ok {
+		t.Fatalf("panic end event unexpectedly contains error: %#v", end)
 	}
 }
 
@@ -312,6 +425,37 @@ func TestRunnerTurnLimitReachedThenResumed(t *testing.T) {
 	}
 	if len(client.recordedRequests()) != 3 {
 		t.Fatalf("request count after resume = %d, want 3", len(client.recordedRequests()))
+	}
+	assertCompleteToolHistory(t, client.recordedRequests()[2].Messages)
+}
+
+func TestExecToolCallRejectsInvalidModelOutput(t *testing.T) {
+	runner := &Runner{}
+	session := newTestSession(t, Options{})
+
+	tests := []struct {
+		name string
+		call openai.ToolCall
+		want string
+	}{
+		{
+			name: "unknown tool",
+			call: toolCall("call-unknown", "not_a_real_tool", `{}`),
+			want: "unknown tool: not_a_real_tool",
+		},
+		{
+			name: "malformed arguments",
+			call: toolCall("call-malformed", "shell", `not-json`),
+			want: "invalid tool arguments:",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := runner.execToolCall(context.Background(), session, test.call)
+			if !strings.Contains(got, test.want) {
+				t.Fatalf("execToolCall() = %q, want it to contain %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -577,6 +721,33 @@ func assertNoExecEvents(t *testing.T, events []map[string]any) {
 	for _, eventType := range eventTypes(t, events) {
 		if eventType == "exec_command_begin" || eventType == "exec_command_end" {
 			t.Fatalf("denied call emitted %s", eventType)
+		}
+	}
+}
+
+func assertCompleteToolHistory(t *testing.T, messages []openai.ChatCompletionMessage) {
+	t.Helper()
+
+	toolResponses := make(map[string][]openai.ChatCompletionMessage)
+	for _, message := range messages {
+		if message.Role != openai.ChatMessageRoleTool {
+			continue
+		}
+		if message.Content == "" {
+			t.Fatalf("tool response %q has empty Content", message.ToolCallID)
+		}
+		toolResponses[message.ToolCallID] = append(toolResponses[message.ToolCallID], message)
+	}
+
+	for _, message := range messages {
+		if message.Role != openai.ChatMessageRoleAssistant {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			responses := toolResponses[call.ID]
+			if len(responses) != 1 {
+				t.Fatalf("tool call %q has %d responses, want exactly 1", call.ID, len(responses))
+			}
 		}
 	}
 }

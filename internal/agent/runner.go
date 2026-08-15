@@ -101,6 +101,8 @@ func builtinTools() []openai.Tool {
 }
 
 func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, error) {
+	// ponytail: This lock spans model, approval, tool, and emitter calls, so a hung dependency leaves the thread busy;
+	// per-phase state locking plus a caller-visible cancel/abort channel would remove that ceiling.
 	if !s.mu.TryLock() {
 		return "", ErrBusy
 	}
@@ -158,10 +160,14 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		}
 
 		for _, toolCall := range res.ToolCalls {
+			content := r.safeExecToolCall(ctx, s, toolCall)
+			if content == "" {
+				content = "(empty output)"
+			}
 			s.messages = append(s.messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
 				ToolCallID: toolCall.ID,
-				Content:    r.execToolCall(ctx, s, toolCall),
+				Content:    content,
 			})
 		}
 	}
@@ -172,6 +178,16 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		"message": err.Error(),
 	})
 	return "", err
+}
+
+func (r *Runner) safeExecToolCall(ctx context.Context, s *Session, toolCall openai.ToolCall) (result string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = fmt.Sprintf("internal error: tool execution panicked: %v", recovered)
+		}
+	}()
+
+	return r.execToolCall(ctx, s, toolCall)
 }
 
 func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.ToolCall) string {
@@ -202,11 +218,15 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 	case policy.Deny:
 		return "operation denied by sandbox policy: " + reason
 	case policy.AskApproval:
+		approvalReason := reason
+		if args.Justification != "" {
+			approvalReason = fmt.Sprintf("%s (model justification: %s)", reason, args.Justification)
+		}
 		if !r.Approver.Approve(ctx, s.ID, ApprovalRequest{
 			Tool:    toolCall.Function.Name,
 			Command: args.Command,
 			Path:    args.Path,
-			Reason:  args.Justification,
+			Reason:  approvalReason,
 		}) {
 			return "operation denied: approval was not granted"
 		}
@@ -222,28 +242,30 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 	} else {
 		beginEvent["path"] = args.Path
 	}
+
+	var exitCode *int
+	if toolCall.Function.Name == "shell" {
+		unknownExitCode := -1
+		exitCode = &unknownExitCode
+	}
+	var toolErr error
+	defer func() {
+		r.emitExecEnd(ctx, s, toolCall.ID, toolCall.Function.Name, exitCode, toolErr)
+	}()
 	r.Emitter.Emit(ctx, s.ID, beginEvent)
 
 	switch toolCall.Function.Name {
 	case "shell":
-		out, exitCode, err := tools.RunShell(
+		out, code, err := tools.RunShell(
 			ctx,
 			s.cwd,
 			args.Command,
 			time.Duration(args.TimeoutSeconds)*time.Second,
 		)
-		endEvent := map[string]any{
-			"type":      "exec_command_end",
-			"call_id":   toolCall.ID,
-			"tool":      toolCall.Function.Name,
-			"exit_code": exitCode,
-		}
-		if err != nil {
-			endEvent["error"] = err.Error()
-		}
-		r.Emitter.Emit(ctx, s.ID, endEvent)
+		*exitCode = code
+		toolErr = err
 
-		result := fmt.Sprintf("exit code: %d\n%s", exitCode, out)
+		result := fmt.Sprintf("exit code: %d\n%s", code, out)
 		if err != nil {
 			result += fmt.Sprintf("\n[error: %s]", err)
 		}
@@ -251,15 +273,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 
 	case "read_file":
 		content, err := tools.ReadFile(s.cwd, args.Path)
-		endEvent := map[string]any{
-			"type":    "exec_command_end",
-			"call_id": toolCall.ID,
-			"tool":    toolCall.Function.Name,
-		}
-		if err != nil {
-			endEvent["error"] = err.Error()
-		}
-		r.Emitter.Emit(ctx, s.ID, endEvent)
+		toolErr = err
 
 		if err != nil {
 			return "error: " + err.Error()
@@ -268,15 +282,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 
 	case "write_file":
 		err := tools.WriteFile(s.cwd, args.Path, args.Content)
-		endEvent := map[string]any{
-			"type":    "exec_command_end",
-			"call_id": toolCall.ID,
-			"tool":    toolCall.Function.Name,
-		}
-		if err != nil {
-			endEvent["error"] = err.Error()
-		}
-		r.Emitter.Emit(ctx, s.ID, endEvent)
+		toolErr = err
 
 		if err != nil {
 			return "error: " + err.Error()
@@ -284,5 +290,27 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		return fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)
 	}
 
-	panic("unreachable")
+	return "unknown tool: " + toolCall.Function.Name
+}
+
+func (r *Runner) emitExecEnd(
+	ctx context.Context,
+	s *Session,
+	callID string,
+	tool string,
+	exitCode *int,
+	err error,
+) {
+	endEvent := map[string]any{
+		"type":    "exec_command_end",
+		"call_id": callID,
+		"tool":    tool,
+	}
+	if exitCode != nil {
+		endEvent["exit_code"] = *exitCode
+	}
+	if err != nil {
+		endEvent["error"] = err.Error()
+	}
+	r.Emitter.Emit(ctx, s.ID, endEvent)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -49,6 +50,35 @@ func TestMainRequiresDeepSeekAPIKey(t *testing.T) {
 	const want = "DEEPSEEK_API_KEY environment variable or ~/.config/ds-mcp/auth.json is required"
 	if !strings.Contains(output, want) {
 		t.Fatalf("main() failure output = %q, want it to contain %q", output, want)
+	}
+}
+
+func TestMainVersion(t *testing.T) {
+	if os.Getenv(mainChild) == t.Name() {
+		os.Args = []string{os.Args[0], "--version"}
+		main()
+		os.Exit(0)
+	}
+
+	home := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
+	for _, entry := range os.Environ() {
+		if !hasEnvName(entry, "DEEPSEEK_API_KEY") &&
+			!hasEnvName(entry, "HOME") &&
+			!hasEnvName(entry, mainChild) {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "HOME="+home, mainChild+"="+t.Name())
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("main() --version error = %v; stderr = %q", err, stderr.String())
+	}
+	if got, want := stdout.String(), "ds-mcp "+version+"\n"; got != want {
+		t.Fatalf("main() --version stdout = %q, want %q", got, want)
 	}
 }
 

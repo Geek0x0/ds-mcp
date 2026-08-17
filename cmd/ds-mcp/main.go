@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,13 @@ import (
 const version = "0.2.0"
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Printf("ds-mcp %s\n", version)
+		return
+	}
+
 	key, err := resolveAPIKey()
 	if err != nil {
 		log.Fatal(err)

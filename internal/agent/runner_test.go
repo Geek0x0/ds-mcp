@@ -175,6 +175,37 @@ func TestRunnerPureTextOneTurn(t *testing.T) {
 	}
 }
 
+func TestRunnerIncludesReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+		want    string
+	}{
+		{name: "default", options: Options{}, want: "high"},
+		{name: "explicit override", options: Options{ReasoningEffort: "low"}, want: "low"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &stubClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "done"}}}}
+			session := newTestSession(t, test.options)
+			runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+
+			if _, err := runner.Run(context.Background(), session, "finish the task"); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			requests := client.recordedRequests()
+			if len(requests) != 1 {
+				t.Fatalf("request count = %d, want 1", len(requests))
+			}
+			if requests[0].ReasoningEffort != test.want {
+				t.Fatalf("request reasoning effort = %q, want %q", requests[0].ReasoningEffort, test.want)
+			}
+		})
+	}
+}
+
 func TestRunnerShellToolCallThenText(t *testing.T) {
 	call := toolCall("call-shell", "shell", `{"command":"echo hi"}`)
 	client := &stubClient{turns: []stubTurn{
@@ -530,11 +561,22 @@ func TestManagerBasics(t *testing.T) {
 	if got, ok := manager.Get(first.ID); !ok || got != first {
 		t.Fatalf("Get(first.ID) = (%#v, %v), want first session", got, ok)
 	}
-	if first.model != "deepseek-chat" || first.maxTurns != DefaultMaxTurns {
+	if first.model != "deepseek-v4-pro" || first.maxTurns != DefaultMaxTurns {
 		t.Fatalf("defaults = model %q, max turns %d", first.model, first.maxTurns)
 	}
 	if len(first.messages) != 1 || first.messages[0].Role != openai.ChatMessageRoleSystem || first.messages[0].Content != DefaultSystemPrompt {
 		t.Fatalf("initial messages = %#v", first.messages)
+	}
+}
+
+func TestManagerReasoningEffort(t *testing.T) {
+	manager := NewManager()
+
+	if got := manager.Create(Options{}).reasoningEffort; got != "high" {
+		t.Fatalf("default reasoning effort = %q, want %q", got, "high")
+	}
+	if got := manager.Create(Options{ReasoningEffort: "low"}).reasoningEffort; got != "low" {
+		t.Fatalf("explicit reasoning effort = %q, want %q", got, "low")
 	}
 }
 

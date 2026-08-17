@@ -20,24 +20,26 @@ const DefaultSystemPrompt = `You are ds-mcp, a coding agent powered by DeepSeek.
 Work autonomously on the task you are given: inspect what you need, make the smallest change that satisfies the request, and verify it when possible. Some calls may be denied by the sandbox policy or the user; when that happens, adapt your approach or explain the blocker instead of repeating the same call. When the task is done, reply WITHOUT any tool call: summarize what you did, list changed files, and how you verified the result.`
 
 type Options struct {
-	Model        string
-	Cwd          string
-	Sandbox      policy.Sandbox
-	Approval     policy.ApprovalPolicy
-	SystemPrompt string
-	MaxTurns     int
+	Model           string
+	ReasoningEffort string
+	Cwd             string
+	Sandbox         policy.Sandbox
+	Approval        policy.ApprovalPolicy
+	SystemPrompt    string
+	MaxTurns        int
 }
 
 type Session struct {
 	ID string
 
-	model    string
-	cwd      string
-	sandbox  policy.Sandbox
-	approval policy.ApprovalPolicy
-	maxTurns int
-	messages []openai.ChatCompletionMessage
-	mu       sync.Mutex
+	model           string
+	reasoningEffort string
+	cwd             string
+	sandbox         policy.Sandbox
+	approval        policy.ApprovalPolicy
+	maxTurns        int
+	messages        []openai.ChatCompletionMessage
+	mu              sync.Mutex
 }
 
 type Manager struct {
@@ -51,7 +53,10 @@ func NewManager() *Manager {
 
 func (m *Manager) Create(o Options) *Session {
 	if o.Model == "" {
-		o.Model = "deepseek-chat"
+		o.Model = "deepseek-v4-pro"
+	}
+	if o.ReasoningEffort == "" {
+		o.ReasoningEffort = "high"
 	}
 	if o.MaxTurns <= 0 {
 		o.MaxTurns = DefaultMaxTurns
@@ -61,12 +66,13 @@ func (m *Manager) Create(o Options) *Session {
 	}
 
 	session := &Session{
-		ID:       uuid.NewString(),
-		model:    o.Model,
-		cwd:      o.Cwd,
-		sandbox:  o.Sandbox,
-		approval: o.Approval,
-		maxTurns: o.MaxTurns,
+		ID:              uuid.NewString(),
+		model:           o.Model,
+		reasoningEffort: o.ReasoningEffort,
+		cwd:             o.Cwd,
+		sandbox:         o.Sandbox,
+		approval:        o.Approval,
+		maxTurns:        o.MaxTurns,
 		messages: []openai.ChatCompletionMessage{{
 			Role:    openai.ChatMessageRoleSystem,
 			Content: o.SystemPrompt,

@@ -118,9 +118,10 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		res, err := r.Client.ChatTurn(
 			ctx,
 			openai.ChatCompletionRequest{
-				Model:    s.model,
-				Messages: s.messages,
-				Tools:    builtinTools(),
+				Model:           s.model,
+				Messages:        s.messages,
+				Tools:           builtinTools(),
+				ReasoningEffort: s.reasoningEffort,
 			},
 			func(delta string) {
 				r.Emitter.Emit(ctx, s.ID, map[string]any{

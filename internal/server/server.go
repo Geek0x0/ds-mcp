@@ -42,6 +42,11 @@ func (s *Server) ServeStdio() error {
 	return mcpserver.ServeStdio(s.mcp)
 }
 
+type toolOutput struct {
+	ThreadID string `json:"threadId" jsonschema_description:"ID of the DeepSeek agent thread that produced this result."`
+	Content  string `json:"content" jsonschema_description:"Human-readable report text from the DeepSeek agent."`
+}
+
 func deepseekTool() mcp.Tool {
 	return mcp.NewTool(
 		"deepseek",
@@ -83,6 +88,7 @@ func deepseekTool() mcp.Tool {
 			"config",
 			mcp.Description("loose config map; recognized key: max_turns (number from 1 to 100000); unknown keys and out-of-range values are silently ignored"),
 		),
+		mcp.WithOutputSchema[toolOutput](),
 	)
 }
 
@@ -100,6 +106,7 @@ func replyTool() mcp.Tool {
 			mcp.Required(),
 			mcp.Description("Follow-up prompt to send to the existing DeepSeek agent thread."),
 		),
+		mcp.WithOutputSchema[toolOutput](),
 	)
 }
 
@@ -220,12 +227,12 @@ func (s *Server) handleReply(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 func resultWithThreadID(threadID, text string, err error) *mcp.CallToolResult {
 	if err == nil {
-		structured := map[string]any{"threadId": threadID, "message": text}
+		structured := map[string]any{"threadId": threadID, "content": text}
 		return mcp.NewToolResultStructured(structured, text)
 	}
 
 	errorText := "error: " + err.Error()
-	structured := map[string]any{"threadId": threadID, "message": errorText}
+	structured := map[string]any{"threadId": threadID, "content": errorText}
 	result := mcp.NewToolResultStructured(structured, errorText)
 	result.IsError = true
 	return result

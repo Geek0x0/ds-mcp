@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -181,6 +182,43 @@ func TestToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestToolOutputSchemas(t *testing.T) {
+	tests := []struct {
+		name string
+		tool mcp.Tool
+	}{
+		{name: "deepseek", tool: deepseekTool()},
+		{name: "deepseek-reply", tool: replyTool()},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.tool.OutputSchema.Type == "" {
+				t.Fatalf("tool %q has no output schema", test.name)
+			}
+			raw, err := json.Marshal(test.tool.OutputSchema)
+			if err != nil {
+				t.Fatalf("marshal output schema: %v", err)
+			}
+			t.Logf("output schema: %s", raw)
+
+			var schema map[string]any
+			if err := json.Unmarshal(raw, &schema); err != nil {
+				t.Fatalf("unmarshal output schema: %v", err)
+			}
+			properties, ok := schema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("output schema properties = %#v, want map", schema["properties"])
+			}
+			for _, want := range []string{"threadId", "content"} {
+				if _, ok := properties[want]; !ok {
+					t.Errorf("output schema properties = %#v, want property %q", properties, want)
+				}
+			}
+		})
+	}
+}
+
 func TestHandleDeepseekValidation(t *testing.T) {
 	nonexistent := filepath.Join(t.TempDir(), "missing")
 	tests := []struct {
@@ -265,7 +303,7 @@ func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 	if got := toolResultText(t, first); got != "hi" {
 		t.Fatalf("handleDeepseek() text = %q, want %q", got, "hi")
 	}
-	if got := toolResultMessage(t, first); got != "hi" {
+	if got := toolResultContent(t, first); got != "hi" {
 		t.Fatalf("handleDeepseek() message = %q, want %q", got, "hi")
 	}
 	threadID := toolResultThreadID(t, first)
@@ -283,7 +321,7 @@ func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 	if got := toolResultText(t, reply); got != "continued" {
 		t.Fatalf("handleReply() text = %q, want %q", got, "continued")
 	}
-	if got := toolResultMessage(t, reply); got != "continued" {
+	if got := toolResultContent(t, reply); got != "continued" {
 		t.Fatalf("handleReply() message = %q, want %q", got, "continued")
 	}
 	if got := toolResultThreadID(t, reply); got != threadID {
@@ -419,7 +457,7 @@ func TestHandleReplyBusy(t *testing.T) {
 	if got := toolResultThreadID(t, busy); got != threadID {
 		t.Fatalf("busy result threadId = %q, want %q", got, threadID)
 	}
-	if got := toolResultMessage(t, busy); got != busyText {
+	if got := toolResultContent(t, busy); got != busyText {
 		t.Fatalf("busy result message = %q, want it to equal text %q", got, busyText)
 	}
 
@@ -458,8 +496,8 @@ func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
 	if !strings.Contains(text, "turn limit reached (1)") {
 		t.Fatalf("result text = %q, want turn limit", text)
 	}
-	if message := toolResultMessage(t, result); message != text {
-		t.Fatalf("result message = %q, want it to equal text %q", message, text)
+	if content := toolResultContent(t, result); content != text {
+		t.Fatalf("result content = %q, want it to equal text %q", content, text)
 	}
 	if threadID := toolResultThreadID(t, result); threadID == "" {
 		t.Fatal("turn-limit result has empty threadId")
@@ -648,17 +686,17 @@ func toolResultThreadID(t *testing.T, result *mcp.CallToolResult) string {
 	return threadID
 }
 
-func toolResultMessage(t *testing.T, result *mcp.CallToolResult) string {
+func toolResultContent(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
 	structured, ok := result.StructuredContent.(map[string]any)
 	if !ok {
 		t.Fatalf("structured content = %#v, want map[string]any", result.StructuredContent)
 	}
-	message, ok := structured["message"].(string)
+	content, ok := structured["content"].(string)
 	if !ok {
-		t.Fatalf("structured message = %#v, want string", structured["message"])
+		t.Fatalf("structured content = %#v, want string", structured["content"])
 	}
-	return message
+	return content
 }
 
 func toolMessageContent(t *testing.T, messages []openai.ChatCompletionMessage, callID string) string {

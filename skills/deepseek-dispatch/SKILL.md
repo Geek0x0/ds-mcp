@@ -40,7 +40,9 @@ The `approval-policy` determines what happens to operations inside or outside th
 
 Approval requests are sent to the MCP client. If approval elicitation is unavailable or unanswered for five minutes, the request is denied.
 
-`cwd` must be an absolute path to an existing directory; a Git worktree root is usually a sensible choice. If omitted, it defaults to the ds-mcp process working directory. `model` defaults to `deepseek-chat`; pass `deepseek-reasoner` when the reasoning model is appropriate.
+`cwd` must be an absolute path to an existing directory; a Git worktree root is usually a sensible choice. If omitted, it defaults to the ds-mcp process working directory. `model` defaults to `deepseek-v4-pro`.
+
+Use `reasoning-effort` to control reasoning depth on the default model. It accepts `low`, `high`, or `max` and defaults to `high`: choose `low` for simple, fast tasks, keep `high` for typical work, and use `max` for the hardest multi-step or planning-heavy tasks.
 
 The optional loose `config` object recognizes `max_turns`. A number from 1 through 100000 overrides the default limit of 50 agent turns. Unknown keys, values of the wrong type, and out-of-range values are silently ignored.
 

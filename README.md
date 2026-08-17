@@ -24,14 +24,22 @@ ds-mcp exposes DeepSeek as a full MCP coding agent with real shell and file-tool
    claude plugin install deepseek@ds-mcp
    ```
 
-4. Export `DEEPSEEK_API_KEY` in the environment that launches Claude Code, restart or reconnect as needed, then run `/deepseek:setup` to verify the binary and environment.
+4. Configure a DeepSeek API key in the environment that launches Claude Code (see [Environment](#environment) for both credential sources), restart or reconnect as needed, then run `/deepseek:setup` to verify the binary and environment.
 
 ## Environment
 
 | Variable | Required | Description |
 |---|---:|---|
-| `DEEPSEEK_API_KEY` | Yes | DeepSeek API key. The server exits at startup if it is empty. |
+| `DEEPSEEK_API_KEY` | No | DeepSeek API key. When set to a non-empty value, it takes precedence over the auth file. |
 | `DEEPSEEK_BASE_URL` | No | API base URL. Defaults to `https://api.deepseek.com`. |
+
+The server checks `DEEPSEEK_API_KEY` first. If it is unset or empty, the server falls back to `~/.config/ds-mcp/auth.json`, which must contain:
+
+```json
+{"api_key": "..."}
+```
+
+One of these credential sources is required. The auth file must have no group or other access (permissions no more permissive than `0600`); otherwise, the server refuses to start and instructs you to run `chmod 600` on the file. Invalid JSON produces a startup error identifying the file as invalid JSON, and an empty or missing `api_key` produces a startup error identifying that field instead of silently falling through to the generic credential-required error.
 
 ## Tools
 
@@ -42,7 +50,8 @@ Starts a new coding-agent thread.
 | Parameter | Required | Default | Description |
 |---|---:|---|---|
 | `prompt` | Yes | — | String task prompt for the new thread. |
-| `model` | No | `deepseek-chat` | DeepSeek model name. `deepseek-reasoner` is a supported alternative. |
+| `model` | No | `deepseek-v4-pro` | DeepSeek model name. |
+| `reasoning-effort` | No | `high` | Reasoning effort: `low` for simple tasks, `high` for typical work, or `max` for the hardest problems. |
 | `cwd` | No | Server process working directory | Absolute path to an existing directory. |
 | `sandbox` | No | `read-only` | `read-only`, `workspace-write`, or `danger-full-access`. |
 | `approval-policy` | No | `on-request` | `untrusted`, `on-request`, `on-failure`, or `never`. |

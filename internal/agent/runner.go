@@ -272,7 +272,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		return result
 
 	case "read_file":
-		content, err := tools.ReadFile(s.cwd, args.Path)
+		content, err := tools.ReadFile(ctx, s.cwd, args.Path)
 		toolErr = err
 
 		if err != nil {

@@ -211,7 +211,7 @@ func TestReadFile(t *testing.T) {
 			t.Fatalf("WriteFile fixture: %v", err)
 		}
 
-		got, err := ReadFile(cwd, "example.txt")
+		got, err := ReadFile(context.Background(), cwd, "example.txt")
 		if err != nil {
 			t.Fatalf("ReadFile() error = %v", err)
 		}
@@ -227,7 +227,7 @@ func TestReadFile(t *testing.T) {
 			t.Fatalf("WriteFile fixture: %v", err)
 		}
 
-		got, err := ReadFile(cwd, "large.txt")
+		got, err := ReadFile(context.Background(), cwd, "large.txt")
 		if err != nil {
 			t.Fatalf("ReadFile() error = %v", err)
 		}
@@ -240,8 +240,59 @@ func TestReadFile(t *testing.T) {
 		}
 	})
 
+	t.Run("bounds read of sparse large file", func(t *testing.T) {
+		const size int64 = 256 * 1024 * 1024
+		path := filepath.Join(cwd, "sparse-large.txt")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatalf("Create fixture: %v", err)
+		}
+		if err := file.Truncate(size); err != nil {
+			_ = file.Close()
+			t.Fatalf("Truncate fixture: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("Close fixture: %v", err)
+		}
+
+		start := time.Now()
+		got, err := ReadFile(context.Background(), cwd, "sparse-large.txt")
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("ReadFile() error = %v", err)
+		}
+		const marker = "[content truncated: 268435456 bytes total]"
+		if !strings.HasSuffix(got, marker) {
+			t.Errorf("ReadFile() result does not end with %q", marker)
+		}
+		if elapsed >= time.Second {
+			t.Errorf("ReadFile() elapsed = %v, want less than 1s", elapsed)
+		}
+	})
+
+	t.Run("times out reading FIFO without writer", func(t *testing.T) {
+		path := filepath.Join(cwd, "blocked.fifo")
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatalf("Mkfifo fixture: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := ReadFile(ctx, cwd, "blocked.fifo")
+		elapsed := time.Since(start)
+
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("ReadFile() error = %v, want timed out error", err)
+		}
+		if elapsed >= time.Second {
+			t.Errorf("ReadFile() elapsed = %v, want less than 1s", elapsed)
+		}
+	})
+
 	t.Run("returns error for nonexistent file", func(t *testing.T) {
-		if _, err := ReadFile(cwd, "missing.txt"); err == nil {
+		if _, err := ReadFile(context.Background(), cwd, "missing.txt"); err == nil {
 			t.Fatal("ReadFile() error = nil, want an error")
 		}
 	})

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,15 +90,69 @@ func RunShell(ctx context.Context, cwd, command string, timeout time.Duration) (
 	return out, -1, runErr
 }
 
-func ReadFile(cwd, path string) (string, error) {
-	data, err := os.ReadFile(resolvePath(cwd, path))
-	if err != nil {
-		return "", err
+func ReadFile(ctx context.Context, cwd, path string) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, DefaultShellTimeout)
+	defer cancel()
+
+	type readResult struct {
+		data      []byte
+		totalSize int64
+		err       error
 	}
-	if len(data) <= MaxOutputBytes {
-		return string(data), nil
+
+	resultCh := make(chan readResult, 1)
+	fileCh := make(chan *os.File)
+	// ponytail: os.Open is not context-aware, so a timeout can leave its goroutine blocked
+	// until the open returns. A platform-specific nonblocking open plus polling could make
+	// opening fully cancellable.
+	go func() {
+		file, err := os.Open(resolvePath(cwd, path))
+		if err != nil {
+			resultCh <- readResult{err: err}
+			return
+		}
+		select {
+		case fileCh <- file:
+		case <-readCtx.Done():
+			_ = file.Close()
+			return
+		}
+		defer file.Close()
+
+		var totalSize int64
+		if info, statErr := file.Stat(); statErr == nil {
+			totalSize = info.Size()
+		}
+		data, err := io.ReadAll(io.LimitReader(file, int64(MaxOutputBytes)+1))
+		if totalSize < int64(len(data)) {
+			totalSize = int64(len(data))
+		}
+		resultCh <- readResult{data: data, totalSize: totalSize, err: err}
+	}()
+
+	var file *os.File
+	for {
+		select {
+		case file = <-fileCh:
+			fileCh = nil
+		case result := <-resultCh:
+			if result.err != nil {
+				return "", result.err
+			}
+			if len(result.data) <= MaxOutputBytes {
+				return string(result.data), nil
+			}
+			return string(result.data[:MaxOutputBytes]) + fmt.Sprintf("\n[content truncated: %d bytes total]", result.totalSize), nil
+		case <-readCtx.Done():
+			if file != nil {
+				_ = file.Close()
+			}
+			if errors.Is(readCtx.Err(), context.DeadlineExceeded) {
+				return "", fmt.Errorf("file read timed out: %w", readCtx.Err())
+			}
+			return "", readCtx.Err()
+		}
 	}
-	return string(data[:MaxOutputBytes]) + fmt.Sprintf("\n[content truncated: %d bytes total]", len(data)), nil
 }
 
 func WriteFile(cwd, path, content string) error {

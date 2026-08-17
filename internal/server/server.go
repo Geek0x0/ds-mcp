@@ -53,7 +53,7 @@ func deepseekTool() mcp.Tool {
 		),
 		mcp.WithString(
 			"model",
-			mcp.Description("DeepSeek model name; defaults to deepseek-chat."),
+			mcp.Description("DeepSeek model name; defaults to deepseek-v4-pro."),
 		),
 		mcp.WithString(
 			"cwd",
@@ -66,6 +66,10 @@ func deepseekTool() mcp.Tool {
 		mcp.WithString(
 			"approval-policy",
 			mcp.Description("Approval policy: untrusted, on-request, on-failure, or never; defaults to on-request."),
+		),
+		mcp.WithString(
+			"reasoning-effort",
+			mcp.Description("Reasoning effort for DeepSeek's thinking mode: low, high, or max; defaults to high."),
 		),
 		mcp.WithString(
 			"base-instructions",
@@ -124,6 +128,14 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		)), nil
 	}
 
+	reasoningEffort := req.GetString("reasoning-effort", "high")
+	if reasoningEffort != "low" && reasoningEffort != "high" && reasoningEffort != "max" {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"invalid reasoning-effort %q; valid values: low, high, max",
+			reasoningEffort,
+		)), nil
+	}
+
 	var cwd string
 	if raw, present := arguments["cwd"]; present {
 		var ok bool
@@ -168,12 +180,13 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	sess := s.mgr.Create(agent.Options{
-		Model:        req.GetString("model", ""),
-		Cwd:          cwd,
-		Sandbox:      sandbox,
-		Approval:     approval,
-		SystemPrompt: systemPrompt,
-		MaxTurns:     maxTurns,
+		Model:           req.GetString("model", ""),
+		Cwd:             cwd,
+		Sandbox:         sandbox,
+		Approval:        approval,
+		ReasoningEffort: reasoningEffort,
+		SystemPrompt:    systemPrompt,
+		MaxTurns:        maxTurns,
 	})
 	text, err := s.runner.Run(ctx, sess, prompt)
 	return resultWithThreadID(sess.ID, text, err), nil

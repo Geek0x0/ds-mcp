@@ -137,6 +137,7 @@ func TestToolDeclarations(t *testing.T) {
 				"developer-instructions",
 				"model",
 				"prompt",
+				"reasoning-effort",
 				"sandbox",
 			},
 			required: []string{"prompt"},
@@ -201,6 +202,11 @@ func TestHandleDeepseekValidation(t *testing.T) {
 			name:     "invalid approval policy",
 			args:     map[string]any{"prompt": "hello", "approval-policy": "bogus"},
 			contains: []string{"bogus", "untrusted", "on-request", "on-failure", "never"},
+		},
+		{
+			name:     "invalid reasoning effort",
+			args:     map[string]any{"prompt": "hello", "reasoning-effort": "bogus"},
+			contains: []string{"bogus", "low", "high", "max"},
 		},
 		{
 			name:     "relative cwd",
@@ -287,6 +293,7 @@ func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
 		"prompt":                 "hello",
 		"cwd":                    t.TempDir(),
 		"model":                  "deepseek-reasoner",
+		"reasoning-effort":       "max",
 		"base-instructions":      "custom base",
 		"developer-instructions": "custom developer",
 		"config": map[string]any{
@@ -304,8 +311,32 @@ func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
 	if requests[0].Model != "deepseek-reasoner" {
 		t.Fatalf("model = %q, want %q", requests[0].Model, "deepseek-reasoner")
 	}
+	if requests[0].ReasoningEffort != "max" {
+		t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, "max")
+	}
 	if got := requests[0].Messages[0].Content; got != "custom base\n\ncustom developer" {
 		t.Fatalf("system prompt = %q, want custom base and developer instructions", got)
+	}
+}
+
+func TestHandleDeepseekDefaultsReasoningEffort(t *testing.T) {
+	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+	s := New(client, "test")
+
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "hello",
+		"cwd":    t.TempDir(),
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+	}
+
+	requests := client.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(requests))
+	}
+	if requests[0].ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, "high")
 	}
 }
 

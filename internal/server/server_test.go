@@ -265,6 +265,9 @@ func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 	if got := toolResultText(t, first); got != "hi" {
 		t.Fatalf("handleDeepseek() text = %q, want %q", got, "hi")
 	}
+	if got := toolResultMessage(t, first); got != "hi" {
+		t.Fatalf("handleDeepseek() message = %q, want %q", got, "hi")
+	}
 	threadID := toolResultThreadID(t, first)
 
 	reply, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
@@ -279,6 +282,9 @@ func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 	}
 	if got := toolResultText(t, reply); got != "continued" {
 		t.Fatalf("handleReply() text = %q, want %q", got, "continued")
+	}
+	if got := toolResultMessage(t, reply); got != "continued" {
+		t.Fatalf("handleReply() message = %q, want %q", got, "continued")
 	}
 	if got := toolResultThreadID(t, reply); got != threadID {
 		t.Fatalf("handleReply() threadId = %q, want %q", got, threadID)
@@ -406,11 +412,15 @@ func TestHandleReplyBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleReply() Go error = %v, want nil", err)
 	}
-	if !busy.IsError || !strings.Contains(toolResultText(t, busy), "busy") {
+	busyText := toolResultText(t, busy)
+	if !busy.IsError || !strings.Contains(busyText, "busy") {
 		t.Fatalf("handleReply() result = %#v, want busy tool error", busy)
 	}
 	if got := toolResultThreadID(t, busy); got != threadID {
 		t.Fatalf("busy result threadId = %q, want %q", got, threadID)
+	}
+	if got := toolResultMessage(t, busy); got != busyText {
+		t.Fatalf("busy result message = %q, want it to equal text %q", got, busyText)
 	}
 
 	unblockClient()
@@ -444,8 +454,12 @@ func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
 	if !result.IsError {
 		t.Fatalf("handleDeepseek() result = %#v, want turn-limit tool error", result)
 	}
-	if text := toolResultText(t, result); !strings.Contains(text, "turn limit reached (1)") {
+	text := toolResultText(t, result)
+	if !strings.Contains(text, "turn limit reached (1)") {
 		t.Fatalf("result text = %q, want turn limit", text)
+	}
+	if message := toolResultMessage(t, result); message != text {
+		t.Fatalf("result message = %q, want it to equal text %q", message, text)
 	}
 	if threadID := toolResultThreadID(t, result); threadID == "" {
 		t.Fatal("turn-limit result has empty threadId")
@@ -632,6 +646,19 @@ func toolResultThreadID(t *testing.T, result *mcp.CallToolResult) string {
 		t.Fatalf("structured threadId = %#v, want non-empty string", structured["threadId"])
 	}
 	return threadID
+}
+
+func toolResultMessage(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	structured, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structured content = %#v, want map[string]any", result.StructuredContent)
+	}
+	message, ok := structured["message"].(string)
+	if !ok {
+		t.Fatalf("structured message = %#v, want string", structured["message"])
+	}
+	return message
 }
 
 func toolMessageContent(t *testing.T, messages []openai.ChatCompletionMessage, callID string) string {

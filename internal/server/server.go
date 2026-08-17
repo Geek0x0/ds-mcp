@@ -219,12 +219,14 @@ func (s *Server) handleReply(ctx context.Context, req mcp.CallToolRequest) (*mcp
 }
 
 func resultWithThreadID(threadID, text string, err error) *mcp.CallToolResult {
-	structured := map[string]any{"threadId": threadID}
 	if err == nil {
+		structured := map[string]any{"threadId": threadID, "message": text}
 		return mcp.NewToolResultStructured(structured, text)
 	}
 
-	result := mcp.NewToolResultStructured(structured, "error: "+err.Error())
+	errorText := "error: " + err.Error()
+	structured := map[string]any{"threadId": threadID, "message": errorText}
+	result := mcp.NewToolResultStructured(structured, errorText)
 	result.IsError = true
 	return result
 }

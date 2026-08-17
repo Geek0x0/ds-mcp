@@ -12,7 +12,7 @@ import (
 	dsserver "github.com/Geek0x0/ds-mcp/internal/server"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	key, err := resolveAPIKey()

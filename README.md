@@ -21,6 +21,12 @@ ds-mcp exposes DeepSeek as a full MCP coding agent with real shell and file-tool
 2. Add this repository as a Claude Code plugin marketplace:
 
    ```bash
+   claude plugin marketplace add Geek0x0/ds-mcp
+   ```
+
+   Alternatively, if you already have the repository checked out locally, run:
+
+   ```bash
    claude plugin marketplace add /path/to/ds-mcp
    ```
 

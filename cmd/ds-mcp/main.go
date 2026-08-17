@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"ds-mcp/internal/deepseek"
-	dsserver "ds-mcp/internal/server"
+	"github.com/Geek0x0/ds-mcp/internal/deepseek"
+	dsserver "github.com/Geek0x0/ds-mcp/internal/server"
 )
 
 const version = "0.1.0"

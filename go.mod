@@ -1,4 +1,4 @@
-module ds-mcp
+module github.com/Geek0x0/ds-mcp
 
 go 1.26.2
 

@@ -4,7 +4,13 @@ ds-mcp exposes DeepSeek as a full MCP coding agent with real shell and file-tool
 
 ## Install
 
-1. From the ds-mcp repository root, install the binary:
+1. Install the binary directly from GitHub:
+
+   ```bash
+   go install github.com/Geek0x0/ds-mcp/cmd/ds-mcp@latest
+   ```
+
+   Alternatively, from a local clone of the ds-mcp repository, run:
 
    ```bash
    go install ./cmd/ds-mcp

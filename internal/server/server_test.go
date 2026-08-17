@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"ds-mcp/internal/agent"
-	"ds-mcp/internal/deepseek"
+	"github.com/Geek0x0/ds-mcp/internal/agent"
+	"github.com/Geek0x0/ds-mcp/internal/deepseek"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"

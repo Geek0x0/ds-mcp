@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ds-mcp/internal/testutil"
+	"github.com/Geek0x0/ds-mcp/internal/testutil"
 )
 
 const ambiguousFakeTurnChild = "DS_MCP_AMBIGUOUS_FAKE_TURN_CHILD"

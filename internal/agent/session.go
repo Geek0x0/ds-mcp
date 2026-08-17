@@ -3,7 +3,7 @@ package agent
 import (
 	"sync"
 
-	"ds-mcp/internal/policy"
+	"github.com/Geek0x0/ds-mcp/internal/policy"
 
 	"github.com/google/uuid"
 	openai "github.com/sashabaranov/go-openai"

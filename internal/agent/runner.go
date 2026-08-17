@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"ds-mcp/internal/deepseek"
-	"ds-mcp/internal/policy"
-	"ds-mcp/internal/tools"
+	"github.com/Geek0x0/ds-mcp/internal/deepseek"
+	"github.com/Geek0x0/ds-mcp/internal/policy"
+	"github.com/Geek0x0/ds-mcp/internal/tools"
 
 	openai "github.com/sashabaranov/go-openai"
 )

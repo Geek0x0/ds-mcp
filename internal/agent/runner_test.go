@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ds-mcp/internal/deepseek"
-	"ds-mcp/internal/policy"
+	"github.com/Geek0x0/ds-mcp/internal/deepseek"
+	"github.com/Geek0x0/ds-mcp/internal/policy"
 
 	openai "github.com/sashabaranov/go-openai"
 )

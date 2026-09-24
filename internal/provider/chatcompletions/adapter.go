@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 
@@ -25,6 +26,9 @@ func New(name string, cfg config.Provider, apiKey string) (provider.Provider, er
 }
 
 func (a *Adapter) Name() string { return a.name }
+
+// SetBackoff overrides the stream-setup retry delay; tests use it to avoid real sleeps.
+func (a *Adapter) SetBackoff(backoff func(attempt int) time.Duration) { a.client.Backoff = backoff }
 
 type opaque struct {
 	ReasoningContent string `json:"reasoning_content,omitempty"`

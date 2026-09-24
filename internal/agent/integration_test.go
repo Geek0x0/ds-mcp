@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Geek0x0/subagent-mcp/internal/agent"
+	"github.com/Geek0x0/subagent-mcp/internal/config"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
 	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/testutil"
@@ -57,14 +58,25 @@ func newRig(
 	t.Helper()
 
 	fake := testutil.NewFakeChat(t, turns)
-	client := chatcompletions.NewClient("test-key", fake.URL)
-	client.Backoff = func(int) time.Duration { return 0 }
+	p, err := chatcompletions.New(
+		"deepseek",
+		config.Provider{API: config.APIChatCompletions, BaseURL: fake.URL},
+		"test-key",
+	)
+	if err != nil {
+		t.Fatalf("build chat-completions provider: %v", err)
+	}
+	adapter, ok := p.(*chatcompletions.Adapter)
+	if !ok {
+		t.Fatalf("chat-completions provider type = %T, want *chatcompletions.Adapter", p)
+	}
+	adapter.SetBackoff(func(int) time.Duration { return 0 })
 	if o.Cwd == "" {
 		o.Cwd = t.TempDir()
 	}
 	session := agent.NewManager().Create(o)
 	emitter := &recEmitter{}
-	runner := &agent.Runner{Client: client, Emitter: emitter, Approver: stubApprover(approve)}
+	runner := &agent.Runner{Provider: p, Emitter: emitter, Approver: stubApprover(approve)}
 	return runner, session, emitter, fake
 }
 

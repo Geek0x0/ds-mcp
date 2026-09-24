@@ -15,6 +15,7 @@ import (
 
 	"github.com/Geek0x0/subagent-mcp/internal/agent"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
 	"github.com/Geek0x0/subagent-mcp/internal/repo"
 	"github.com/Geek0x0/subagent-mcp/internal/rollout"
 
@@ -163,11 +164,12 @@ func parseWritableRoots(config map[string]any) ([]string, error) {
 }
 
 type Server struct {
-	mcp      *mcpserver.MCPServer
-	mgr      *agent.Manager
-	runner   *agent.Runner
-	version  string
-	toolName string
+	mcp          *mcpserver.MCPServer
+	mgr          *agent.Manager
+	runner       *agent.Runner
+	version      string
+	providerName string
+	toolName     string
 
 	callsMu sync.Mutex
 	calls   map[string]context.CancelFunc
@@ -206,12 +208,13 @@ func ValidateToolName(name string) error {
 	return nil
 }
 
-func New(client agent.ChatClient, version string, opts ...Option) *Server {
+func New(p provider.Provider, version string, opts ...Option) *Server {
 	s := &Server{
-		mgr:      agent.NewManager(),
-		version:  version,
-		toolName: defaultToolName,
-		calls:    make(map[string]context.CancelFunc),
+		mgr:          agent.NewManager(),
+		version:      version,
+		providerName: p.Name(),
+		toolName:     defaultToolName,
+		calls:        make(map[string]context.CancelFunc),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -238,7 +241,7 @@ func New(client agent.ChatClient, version string, opts ...Option) *Server {
 		mcpserver.WithHooks(hooks),
 	)
 	s.mcp.AddNotificationHandler(cancelledNotificationMethod, s.handleCancelledNotification)
-	s.runner = &agent.Runner{Client: client, Emitter: s, Approver: s}
+	s.runner = &agent.Runner{Provider: p, Emitter: s, Approver: s}
 	s.mcp.AddTool(deepseekTool(s.toolName), s.handleDeepseek)
 	s.mcp.AddTool(replyTool(s.toolName), s.handleReply)
 	return s
@@ -392,7 +395,7 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	config, _ := arguments["config"].(map[string]any)
-	requestedEffort, reasoningEffort, err := resolveReasoningEffort(arguments, config)
+	requested, normalized, err := resolveReasoningEffort(arguments, config)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -451,15 +454,15 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	sess := s.mgr.Create(agent.Options{
-		Model:                    req.GetString("model", ""),
-		Cwd:                      cwd,
-		Sandbox:                  sandbox,
-		Approval:                 approval,
-		ReasoningEffort:          reasoningEffort,
-		RequestedReasoningEffort: requestedEffort,
-		SystemPrompt:             systemPrompt,
-		MaxTurns:                 maxTurns,
-		WritableRoots:            writableRoots,
+		Model:           req.GetString("model", ""),
+		Cwd:             cwd,
+		Sandbox:         sandbox,
+		Approval:        approval,
+		ReasoningEffort: requested,
+		EffortSent:      normalized,
+		SystemPrompt:    systemPrompt,
+		MaxTurns:        maxTurns,
+		WritableRoots:   writableRoots,
 	})
 	created := time.Now()
 	recorder := rollout.Open(sess.ID, created)
@@ -472,7 +475,7 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		"originator":        "subagent-mcp",
 		"cli_version":       s.version,
 		"source":            "mcp",
-		"model_provider":    "deepseek",
+		"model_provider":    s.providerName,
 		"base_instructions": map[string]any{"text": systemPrompt},
 	}
 	if resolvedCwd, err := filepath.EvalSymlinks(cwd); err == nil {

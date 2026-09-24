@@ -17,51 +17,52 @@ import (
 	"unicode/utf8"
 
 	"github.com/Geek0x0/subagent-mcp/internal/agent"
-	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	openai "github.com/sashabaranov/go-openai"
 )
 
 type stubTurn struct {
-	result *chatcompletions.TurnResult
+	result *provider.TurnResult
 	err    error
 }
 
-type stubChatClient struct {
+type stubProvider struct {
 	mu       sync.Mutex
 	turns    []stubTurn
-	repeat   *chatcompletions.TurnResult
-	requests []openai.ChatCompletionRequest
+	repeat   *provider.TurnResult
+	requests []provider.TurnRequest
 	block    <-chan struct{}
 	entered  chan<- struct{}
 }
 
-func (c *stubChatClient) ChatTurn(
+func (p *stubProvider) Name() string { return "deepseek" }
+
+func (p *stubProvider) Turn(
 	ctx context.Context,
-	req openai.ChatCompletionRequest,
+	req provider.TurnRequest,
 	_ func(string),
-) (*chatcompletions.TurnResult, error) {
-	c.mu.Lock()
-	requestCopy := req
-	requestCopy.Messages = append([]openai.ChatCompletionMessage(nil), req.Messages...)
-	requestCopy.Tools = append([]openai.Tool(nil), req.Tools...)
-	c.requests = append(c.requests, requestCopy)
+) (*provider.TurnResult, error) {
+	p.mu.Lock()
+	copied := req
+	copied.Messages = append([]provider.Message(nil), req.Messages...)
+	copied.Tools = append([]provider.ToolSpec(nil), req.Tools...)
+	p.requests = append(p.requests, copied)
 
 	var turn stubTurn
 	switch {
-	case len(c.turns) > 0:
-		turn = c.turns[0]
-		c.turns = c.turns[1:]
-	case c.repeat != nil:
-		turn.result = c.repeat
+	case len(p.turns) > 0:
+		turn = p.turns[0]
+		p.turns = p.turns[1:]
+	case p.repeat != nil:
+		turn.result = p.repeat
 	default:
-		turn.err = errors.New("stub client has no queued turn")
+		turn.err = errors.New("stub provider has no queued turn")
 	}
-	block := c.block
-	entered := c.entered
-	c.mu.Unlock()
+	block := p.block
+	entered := p.entered
+	p.mu.Unlock()
 
 	if entered != nil {
 		select {
@@ -80,11 +81,11 @@ func (c *stubChatClient) ChatTurn(
 	return turn.result, turn.err
 }
 
-func (c *stubChatClient) recordedRequests() []openai.ChatCompletionRequest {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (p *stubProvider) recordedRequests() []provider.TurnRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	return append([]openai.ChatCompletionRequest(nil), c.requests...)
+	return append([]provider.TurnRequest(nil), p.requests...)
 }
 
 type emitterFunc func(context.Context, string, map[string]any)
@@ -185,9 +186,9 @@ func TestToolDeclarations(t *testing.T) {
 }
 
 func TestWithToolNameRegistersRenamedTools(t *testing.T) {
-	client := &stubChatClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{Content: "hi from codex"}},
-		{result: &chatcompletions.TurnResult{Content: "continued"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{Text: "hi from codex"}},
+		{result: &provider.TurnResult{Text: "continued"}},
 	}}
 	s := New(client, "test", WithToolName("codex"))
 
@@ -397,7 +398,7 @@ func TestHandleDeepseekValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubChatClient{}, "test")
+			s := New(&stubProvider{}, "test")
 			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", test.args))
 			if err != nil {
 				t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
@@ -420,7 +421,7 @@ func TestHandleDeepseekIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T)
 	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("REPO-RULE"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "test")
 
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
@@ -432,7 +433,7 @@ func TestHandleDeepseekIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T)
 	if err != nil || result.IsError {
 		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
 	}
-	system := client.recordedRequests()[0].Messages[0].Content
+	system := client.recordedRequests()[0].System
 	base := strings.Index(system, "BASE-INSTRUCTIONS")
 	rule := strings.Index(system, "REPO-RULE")
 	dev := strings.Index(system, "DEV-INSTRUCTIONS")
@@ -446,7 +447,7 @@ func TestHandleDeepseekAgentsMDReadErrorFails(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(cwd, "AGENTS.md"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := New(&stubChatClient{}, "test")
+	s := New(&stubProvider{}, "test")
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
 		"prompt": "hello",
 		"cwd":    cwd,
@@ -457,9 +458,9 @@ func TestHandleDeepseekAgentsMDReadErrorFails(t *testing.T) {
 }
 
 func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
-	client := &stubChatClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{Content: "hi"}},
-		{result: &chatcompletions.TurnResult{Content: "continued"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{Text: "hi"}},
+		{result: &provider.TurnResult{Text: "continued"}},
 	}}
 	s := New(client, "test")
 
@@ -503,7 +504,7 @@ func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 }
 
 func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "test")
 
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
@@ -528,16 +529,16 @@ func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
 	if requests[0].Model != "deepseek-reasoner" {
 		t.Fatalf("model = %q, want %q", requests[0].Model, "deepseek-reasoner")
 	}
-	if requests[0].ReasoningEffort != "max" {
-		t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, "max")
+	if requests[0].Effort != "max" {
+		t.Fatalf("reasoning effort = %q, want %q", requests[0].Effort, "max")
 	}
-	if got := requests[0].Messages[0].Content; got != "custom base\n\ncustom developer" {
+	if got := requests[0].System; got != "custom base\n\ncustom developer" {
 		t.Fatalf("system prompt = %q, want custom base and developer instructions", got)
 	}
 }
 
 func TestHandleDeepseekDefaultsReasoningEffort(t *testing.T) {
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "test")
 
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
@@ -552,8 +553,8 @@ func TestHandleDeepseekDefaultsReasoningEffort(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("request count = %d, want 1", len(requests))
 	}
-	if requests[0].ReasoningEffort != "high" {
-		t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, "high")
+	if requests[0].Effort != "high" {
+		t.Fatalf("reasoning effort = %q, want %q", requests[0].Effort, "high")
 	}
 }
 
@@ -573,7 +574,7 @@ func TestHandleDeepseekReasoningEffortSources(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+			client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 			s := New(client, "test")
 			args := map[string]any{"prompt": "hello", "cwd": t.TempDir()}
 			for key, value := range test.args {
@@ -588,8 +589,8 @@ func TestHandleDeepseekReasoningEffortSources(t *testing.T) {
 			if len(requests) != 1 {
 				t.Fatalf("request count = %d, want 1", len(requests))
 			}
-			if requests[0].ReasoningEffort != test.want {
-				t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, test.want)
+			if requests[0].Effort != test.want {
+				t.Fatalf("reasoning effort = %q, want %q", requests[0].Effort, test.want)
 			}
 		})
 	}
@@ -607,7 +608,7 @@ func TestHandleDeepseekRejectsInvalidConfigReasoningEffort(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubChatClient{}, "test")
+			s := New(&stubProvider{}, "test")
 			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
 				"prompt": "hello",
 				"cwd":    t.TempDir(),
@@ -627,7 +628,7 @@ func TestHandleDeepseekRejectsInvalidConfigReasoningEffort(t *testing.T) {
 }
 
 func TestHandleReplyUnknownThread(t *testing.T) {
-	s := New(&stubChatClient{}, "test")
+	s := New(&stubProvider{}, "test")
 	result, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
 		"threadId": "not-a-thread",
 		"prompt":   "hello",
@@ -647,8 +648,8 @@ func TestHandleReplyBusy(t *testing.T) {
 	t.Cleanup(unblockClient)
 
 	entered := make(chan struct{}, 1)
-	client := &stubChatClient{
-		turns:   []stubTurn{{result: &chatcompletions.TurnResult{Content: "first done"}}},
+	client := &stubProvider{
+		turns:   []stubTurn{{result: &provider.TurnResult{Text: "first done"}}},
 		block:   unblock,
 		entered: entered,
 	}
@@ -733,7 +734,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 			t.Cleanup(func() { unblockOnce.Do(func() { close(unblock) }) })
 
 			entered := make(chan struct{}, 1)
-			client := &stubChatClient{block: unblock, entered: entered}
+			client := &stubProvider{block: unblock, entered: entered}
 			s := New(client, "test")
 
 			rawCall := fmt.Sprintf(
@@ -781,7 +782,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 
 			client.mu.Lock()
 			client.block = nil
-			client.turns = []stubTurn{{result: &chatcompletions.TurnResult{Content: "recovered"}}}
+			client.turns = []stubTurn{{result: &provider.TurnResult{Text: "recovered"}}}
 			client.mu.Unlock()
 			reply, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
 				"threadId": threadID,
@@ -801,7 +802,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 }
 
 func TestCancelledNotificationUnknownIDIsIgnored(t *testing.T) {
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "test")
 
 	for _, raw := range []string{
@@ -831,7 +832,7 @@ func TestCancelledNotificationUnknownIDIsIgnored(t *testing.T) {
 }
 
 func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
-	client := &stubChatClient{repeat: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{
+	client := &stubProvider{repeat: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 		toolCall("call-forever", "unknown_tool", `{}`),
 	}}}
 	s := New(client, "test")
@@ -860,15 +861,15 @@ func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
 }
 
 func TestHandleDeepseekIgnoresExcessiveMaxTurns(t *testing.T) {
-	toolTurn := stubTurn{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{
+	toolTurn := stubTurn{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 		toolCall("call-forever", "unknown_tool", `{}`),
 	}}}
 	turns := make([]stubTurn, agent.DefaultMaxTurns+1)
 	for i := 0; i < agent.DefaultMaxTurns; i++ {
 		turns[i] = toolTurn
 	}
-	turns[agent.DefaultMaxTurns] = stubTurn{result: &chatcompletions.TurnResult{Content: "should not be reached"}}
-	client := &stubChatClient{turns: turns}
+	turns[agent.DefaultMaxTurns] = stubTurn{result: &provider.TurnResult{Text: "should not be reached"}}
+	client := &stubProvider{turns: turns}
 	s := New(client, "test")
 
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
@@ -903,7 +904,7 @@ func TestApproveElicitationActions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubChatClient{}, "test")
+			s := New(&stubProvider{}, "test")
 			var result *mcp.ElicitationResult
 			if test.err == nil {
 				result = &mcp.ElicitationResult{
@@ -943,11 +944,11 @@ func TestApproveElicitationActions(t *testing.T) {
 
 func TestApprovalUnavailableDeniesToolCall(t *testing.T) {
 	cwd := t.TempDir()
-	client := &stubChatClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 			toolCall("call-write", "write_file", `{"path":"blocked.txt","content":"nope"}`),
 		}}},
-		{result: &chatcompletions.TurnResult{Content: "denied safely"}},
+		{result: &provider.TurnResult{Text: "denied safely"}},
 	}}
 	s := New(client, "test")
 
@@ -978,7 +979,7 @@ func TestApprovalUnavailableDeniesToolCall(t *testing.T) {
 }
 
 func TestEmitWithoutClientReturnsPromptly(t *testing.T) {
-	s := New(&stubChatClient{}, "test")
+	s := New(&stubProvider{}, "test")
 	done := make(chan struct{})
 	go func() {
 		s.Emit(context.Background(), "thread", map[string]any{"type": "test"})
@@ -1063,11 +1064,11 @@ func deepseekEventType(t *testing.T, notification mcp.JSONRPCNotification) strin
 func TestProgressNotificationsWithToken(t *testing.T) {
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 
-	client := &stubChatClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 			toolCall("call-shell", "shell", `{"command":"echo hi"}`),
 		}}},
-		{result: &chatcompletions.TurnResult{Content: "line one\nline two"}},
+		{result: &provider.TurnResult{Text: "line one\nline two"}},
 	}}
 	s := New(client, "test")
 	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
@@ -1114,11 +1115,11 @@ func TestProgressNotificationsWithToken(t *testing.T) {
 func TestNoProgressNotificationsWithoutToken(t *testing.T) {
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 
-	client := &stubChatClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 			toolCall("call-shell", "shell", `{"command":"echo hi"}`),
 		}}},
-		{result: &chatcompletions.TurnResult{Content: "line one\nline two"}},
+		{result: &provider.TurnResult{Text: "line one\nline two"}},
 	}}
 	s := New(client, "test")
 	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
@@ -1178,7 +1179,7 @@ func TestHandleDeepseekValidatesWritableRoots(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubChatClient{}, "test")
+			s := New(&stubProvider{}, "test")
 			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
 				"prompt": "hello",
 				"cwd":    t.TempDir(),
@@ -1192,7 +1193,7 @@ func TestHandleDeepseekValidatesWritableRoots(t *testing.T) {
 }
 
 func TestHandleDeepseekAcceptsWritableRoots(t *testing.T) {
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "test")
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
 		"prompt": "hello",
@@ -1208,7 +1209,7 @@ func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "9.9.9")
 
 	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
@@ -1253,7 +1254,7 @@ func TestHandleDeepseekRolloutOffWritesNothing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
-	client := &stubChatClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "ok"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
 	s := New(client, "test")
 	if result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
 		"prompt": "hello",
@@ -1276,14 +1277,11 @@ func callToolRequest(name string, arguments map[string]any) mcp.CallToolRequest 
 	}
 }
 
-func toolCall(id, name, arguments string) openai.ToolCall {
-	return openai.ToolCall{
-		ID:   id,
-		Type: openai.ToolTypeFunction,
-		Function: openai.FunctionCall{
-			Name:      name,
-			Arguments: arguments,
-		},
+func toolCall(id, name, arguments string) provider.ToolCall {
+	return provider.ToolCall{
+		ID:        id,
+		Name:      name,
+		Arguments: arguments,
 	}
 }
 
@@ -1328,16 +1326,16 @@ func toolResultContent(t *testing.T, result *mcp.CallToolResult) string {
 	return content
 }
 
-func toolMessageContent(t *testing.T, messages []openai.ChatCompletionMessage, callID string) string {
+func toolMessageContent(t *testing.T, messages []provider.Message, callID string) string {
 	t.Helper()
 	for _, message := range messages {
-		if message.Role == openai.ChatMessageRoleTool && message.ToolCallID == callID {
-			return message.Content
+		if message.Role == provider.RoleTool && message.ToolCallID == callID {
+			return message.Text
 		}
 	}
 	t.Fatalf("no tool message found for call %q", callID)
 	return ""
 }
 
-var _ agent.ChatClient = (*stubChatClient)(nil)
+var _ provider.Provider = (*stubProvider)(nil)
 var _ mcpserver.SessionWithElicitation = (*fakeElicitationSession)(nil)

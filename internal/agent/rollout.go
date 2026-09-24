@@ -5,37 +5,26 @@ import (
 	"time"
 
 	"github.com/Geek0x0/subagent-mcp/internal/patch"
-	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
-
-	openai "github.com/sashabaranov/go-openai"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
 )
 
-type tokenUsage struct {
-	Input, Cached, Output, Reasoning, Total int
-}
-
-func usageFrom(u *openai.Usage) tokenUsage {
-	t := tokenUsage{Input: u.PromptTokens, Output: u.CompletionTokens, Total: u.TotalTokens}
-	if u.PromptTokensDetails != nil {
-		t.Cached = u.PromptTokensDetails.CachedTokens
+func addUsage(a, b provider.Usage) provider.Usage {
+	return provider.Usage{
+		Input:     a.Input + b.Input,
+		Cached:    a.Cached + b.Cached,
+		Output:    a.Output + b.Output,
+		Reasoning: a.Reasoning + b.Reasoning,
+		Total:     a.Total + b.Total,
 	}
-	if u.CompletionTokensDetails != nil {
-		t.Reasoning = u.CompletionTokensDetails.ReasoningTokens
-	}
-	return t
 }
 
-func (t tokenUsage) add(o tokenUsage) tokenUsage {
-	return tokenUsage{t.Input + o.Input, t.Cached + o.Cached, t.Output + o.Output, t.Reasoning + o.Reasoning, t.Total + o.Total}
-}
-
-func (t tokenUsage) payload() map[string]any {
+func usagePayload(u provider.Usage) map[string]any {
 	return map[string]any{
-		"input_tokens":            t.Input,
-		"cached_input_tokens":     t.Cached,
-		"output_tokens":           t.Output,
-		"reasoning_output_tokens": t.Reasoning,
-		"total_tokens":            t.Total,
+		"input_tokens":            u.Input,
+		"cached_input_tokens":     u.Cached,
+		"output_tokens":           u.Output,
+		"reasoning_output_tokens": u.Reasoning,
+		"total_tokens":            u.Total,
 	}
 }
 
@@ -55,7 +44,8 @@ func recordTurnStart(s *Session, prompt string, started time.Time) {
 		"approval_policy": string(s.approval),
 		"sandbox_policy":  s.sandboxPolicy(),
 		"model":           s.model,
-		"effort":          s.requestedEffort,
+		"effort":          s.reasoningEffort,
+		"effort_sent":     s.effortSent,
 		"current_date":    started.Format("2006-01-02"),
 	})
 	s.rollout.Event(map[string]any{"type": "task_started", "turn_id": s.turnID, "started_at": started.Unix()})
@@ -63,39 +53,39 @@ func recordTurnStart(s *Session, prompt string, started time.Time) {
 	s.rollout.Event(map[string]any{"type": "user_message", "message": prompt})
 }
 
-func recordModelTurn(s *Session, res *chatcompletions.TurnResult) {
+func recordModelTurn(s *Session, res *provider.TurnResult) {
 	if res.Reasoning != "" {
 		s.rollout.Item(map[string]any{"type": "reasoning", "summary": []any{}, "content": textContent("reasoning_text", res.Reasoning)})
 	}
 	if res.Usage != nil {
-		last := usageFrom(res.Usage)
-		s.totalUsage = s.totalUsage.add(last)
+		last := *res.Usage
+		s.totalUsage = addUsage(s.totalUsage, last)
 		s.rollout.Event(map[string]any{"type": "token_count", "info": map[string]any{
-			"total_token_usage": s.totalUsage.payload(),
-			"last_token_usage":  last.payload(),
+			"total_token_usage": usagePayload(s.totalUsage),
+			"last_token_usage":  usagePayload(last),
 		}})
 	}
-	if res.Content != "" {
-		s.rollout.Item(map[string]any{"type": "message", "role": "assistant", "content": textContent("output_text", res.Content)})
-		s.rollout.Event(map[string]any{"type": "agent_message", "message": res.Content})
+	if res.Text != "" {
+		s.rollout.Item(map[string]any{"type": "message", "role": "assistant", "content": textContent("output_text", res.Text)})
+		s.rollout.Event(map[string]any{"type": "agent_message", "message": res.Text})
 	}
 }
 
-func recordToolCall(s *Session, call openai.ToolCall) {
-	if call.Function.Name == "apply_patch" {
+func recordToolCall(s *Session, call provider.ToolCall) {
+	if call.Name == "apply_patch" {
 		var args struct {
 			Patch string `json:"patch"`
 		}
-		_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+		_ = json.Unmarshal([]byte(call.Arguments), &args)
 		s.rollout.Item(map[string]any{"type": "custom_tool_call", "status": "completed", "call_id": call.ID, "name": "apply_patch", "input": args.Patch})
 		return
 	}
-	s.rollout.Item(map[string]any{"type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
+	s.rollout.Item(map[string]any{"type": "function_call", "call_id": call.ID, "name": call.Name, "arguments": call.Arguments})
 }
 
-func recordToolOutput(s *Session, call openai.ToolCall, output string) {
+func recordToolOutput(s *Session, call provider.ToolCall, output string) {
 	itemType := "function_call_output"
-	if call.Function.Name == "apply_patch" {
+	if call.Name == "apply_patch" {
 		itemType = "custom_tool_call_output"
 	}
 	s.rollout.Item(map[string]any{"type": itemType, "call_id": call.ID, "output": output})

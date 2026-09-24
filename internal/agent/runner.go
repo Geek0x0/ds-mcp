@@ -10,22 +10,13 @@ import (
 
 	"github.com/Geek0x0/subagent-mcp/internal/patch"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
-	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
 	"github.com/Geek0x0/subagent-mcp/internal/tools"
 
 	"github.com/google/uuid"
-	openai "github.com/sashabaranov/go-openai"
 )
 
 var ErrBusy = errors.New("thread is busy")
-
-type ChatClient interface {
-	ChatTurn(
-		ctx context.Context,
-		req openai.ChatCompletionRequest,
-		onDelta func(string),
-	) (*chatcompletions.TurnResult, error)
-}
 
 type Emitter interface {
 	Emit(ctx context.Context, threadID string, msg map[string]any)
@@ -43,82 +34,70 @@ type Approver interface {
 }
 
 type Runner struct {
-	Client   ChatClient
+	Provider provider.Provider
 	Emitter  Emitter
 	Approver Approver
 }
 
-func builtinTools() []openai.Tool {
-	return []openai.Tool{
+func BuiltinTools() []provider.ToolSpec {
+	return []provider.ToolSpec{
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name: "shell",
-				Description: "Run a bash command in the working directory. The sandbox policy may deny the call; " +
-					"providing justification helps if approval is required.",
-				Parameters: json.RawMessage(`{
-					"type": "object",
-					"properties": {
-						"command": {"type": "string", "description": "Bash command to run."},
-						"timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds (clamped, max 600)."},
-						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
-					},
-					"required": ["command"]
-				}`),
-			},
+			Name: "shell",
+			Description: "Run a bash command in the working directory. The sandbox policy may deny the call; " +
+				"providing justification helps if approval is required.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"command": {"type": "string", "description": "Bash command to run."},
+					"timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds (clamped, max 600)."},
+					"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
+				},
+				"required": ["command"]
+			}`),
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name: "read_file",
-				Description: "Read a file, resolving relative paths against the working directory. The sandbox policy may deny the call; " +
-					"providing justification helps if approval is required.",
-				Parameters: json.RawMessage(`{
-					"type": "object",
-					"properties": {
-						"path": {"type": "string", "description": "File path to read."},
-						"offset": {"type": "integer", "description": "1-based line number to start reading from; defaults to 1"},
-						"limit": {"type": "integer", "description": "maximum number of lines to return; defaults to all that fit in the 16 KiB output cap"},
-						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
-					},
-					"required": ["path"]
-				}`),
-			},
+			Name: "read_file",
+			Description: "Read a file, resolving relative paths against the working directory. The sandbox policy may deny the call; " +
+				"providing justification helps if approval is required.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"path": {"type": "string", "description": "File path to read."},
+					"offset": {"type": "integer", "description": "1-based line number to start reading from; defaults to 1"},
+					"limit": {"type": "integer", "description": "maximum number of lines to return; defaults to all that fit in the 16 KiB output cap"},
+					"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
+				},
+				"required": ["path"]
+			}`),
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name: "write_file",
-				Description: "Create or overwrite a whole file, creating parent directories as needed. The sandbox policy may deny the call; " +
-					"providing justification helps if approval is required.",
-				Parameters: json.RawMessage(`{
-					"type": "object",
-					"properties": {
-						"path": {"type": "string", "description": "File path to write."},
-						"content": {"type": "string", "description": "Complete file content."},
-						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
-					},
-					"required": ["path", "content"]
-				}`),
-			},
+			Name: "write_file",
+			Description: "Create or overwrite a whole file, creating parent directories as needed. The sandbox policy may deny the call; " +
+				"providing justification helps if approval is required.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"path": {"type": "string", "description": "File path to write."},
+					"content": {"type": "string", "description": "Complete file content."},
+					"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
+				},
+				"required": ["path", "content"]
+			}`),
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name: "apply_patch",
-				Description: "Edit files with a patch: '*** Begin Patch', then '*** Add File: <path>' (+lines), " +
-					"'*** Delete File: <path>', or '*** Update File: <path>' (optional '*** Move to: <path>') with '@@' chunks " +
-					"of ' ' context, '-' removed, and '+' added lines, then '*** End Patch'. Prefer this for editing existing files. " +
-					"The sandbox policy may deny the call; providing justification helps if approval is required.",
-				Parameters: json.RawMessage(`{
-					"type": "object",
-					"properties": {
-						"patch": {"type": "string", "description": "Complete patch text from *** Begin Patch to *** End Patch."},
-						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
-					},
-					"required": ["patch"]
-				}`),
-			},
+			Name: "apply_patch",
+			Description: "Edit files with a patch: '*** Begin Patch', then '*** Add File: <path>' (+lines), " +
+				"'*** Delete File: <path>', or '*** Update File: <path>' (optional '*** Move to: <path>') with '@@' chunks " +
+				"of ' ' context, '-' removed, and '+' added lines, then '*** End Patch'. Prefer this for editing existing files. " +
+				"The sandbox policy may deny the call; providing justification helps if approval is required.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"patch": {"type": "string", "description": "Complete patch text from *** Begin Patch to *** End Patch."},
+					"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
+				},
+				"required": ["patch"]
+			}`),
 		},
 	}
 }
@@ -136,27 +115,21 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 	started := time.Now()
 	s.turnID = uuid.NewString()
 	recordTurnStart(s, prompt, started)
-	s.messages = append(s.messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: prompt,
-	})
+	s.messages = append(s.messages, provider.Message{Role: provider.RoleUser, Text: prompt})
 
 	for turn := 0; turn < s.maxTurns; turn++ {
-		res, err := r.Client.ChatTurn(
-			ctx,
-			openai.ChatCompletionRequest{
-				Model:           s.model,
-				Messages:        s.messages,
-				Tools:           builtinTools(),
-				ReasoningEffort: s.reasoningEffort,
-			},
-			func(delta string) {
-				r.Emitter.Emit(ctx, s.ID, map[string]any{
-					"type":  "agent_message_delta",
-					"delta": delta,
-				})
-			},
-		)
+		res, err := r.Provider.Turn(ctx, provider.TurnRequest{
+			Model:    s.model,
+			Effort:   s.effortSent,
+			System:   s.system,
+			Messages: s.messages,
+			Tools:    BuiltinTools(),
+		}, func(delta string) {
+			r.Emitter.Emit(ctx, s.ID, map[string]any{
+				"type":  "agent_message_delta",
+				"delta": delta,
+			})
+		})
 		if err != nil {
 			r.Emitter.Emit(ctx, s.ID, map[string]any{
 				"type":    "error",
@@ -168,40 +141,34 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		if res.Usage != nil {
 			r.Emitter.Emit(ctx, s.ID, map[string]any{
 				"type":              "token_count",
-				"prompt_tokens":     res.Usage.PromptTokens,
-				"completion_tokens": res.Usage.CompletionTokens,
-				"total_tokens":      res.Usage.TotalTokens,
+				"prompt_tokens":     res.Usage.Input,
+				"completion_tokens": res.Usage.Output,
+				"total_tokens":      res.Usage.Total,
 			})
 		}
 		recordModelTurn(s, res)
-
-		s.messages = append(s.messages, openai.ChatCompletionMessage{
-			Role:             openai.ChatMessageRoleAssistant,
-			Content:          res.Content,
-			ReasoningContent: res.Reasoning,
-			ToolCalls:        res.ToolCalls,
+		s.messages = append(s.messages, provider.Message{
+			Role: provider.RoleAssistant, Text: res.Text, ToolCalls: res.ToolCalls, Opaque: res.Opaque,
 		})
 		if len(res.ToolCalls) == 0 {
 			r.Emitter.Emit(ctx, s.ID, map[string]any{
 				"type":    "agent_message",
-				"message": res.Content,
+				"message": res.Text,
 			})
 			r.Emitter.Emit(ctx, s.ID, map[string]any{"type": "task_complete"})
-			recordTaskComplete(s, res.Content, started)
-			return res.Content, nil
+			recordTaskComplete(s, res.Text, started)
+			return res.Text, nil
 		}
 
-		for _, toolCall := range res.ToolCalls {
-			recordToolCall(s, toolCall)
-			content := r.safeExecToolCall(ctx, s, toolCall)
+		for _, call := range res.ToolCalls {
+			recordToolCall(s, call)
+			content, isError := r.safeExecToolCall(ctx, s, call)
 			if content == "" {
 				content = "(empty output)"
 			}
-			recordToolOutput(s, toolCall, content)
-			s.messages = append(s.messages, openai.ChatCompletionMessage{
-				Role:       openai.ChatMessageRoleTool,
-				ToolCallID: toolCall.ID,
-				Content:    content,
+			recordToolOutput(s, call, content)
+			s.messages = append(s.messages, provider.Message{
+				Role: provider.RoleTool, ToolCallID: call.ID, Text: content, IsError: isError,
 			})
 		}
 	}
@@ -215,17 +182,18 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 	return "", err
 }
 
-func (r *Runner) safeExecToolCall(ctx context.Context, s *Session, toolCall openai.ToolCall) (result string) {
+func (r *Runner) safeExecToolCall(ctx context.Context, s *Session, toolCall provider.ToolCall) (result string, isError bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result = fmt.Sprintf("internal error: tool execution panicked: %v", recovered)
+			isError = true
 		}
 	}()
 
 	return r.execToolCall(ctx, s, toolCall)
 }
 
-func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.ToolCall) string {
+func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall provider.ToolCall) (string, bool) {
 	var args struct {
 		Command        string `json:"command"`
 		TimeoutSeconds int    `json:"timeout_seconds"`
@@ -236,23 +204,23 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		Patch          string `json:"patch"`
 		Justification  string `json:"justification"`
 	}
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-		return "invalid tool arguments: " + err.Error()
+	if err := json.Unmarshal([]byte(toolCall.Arguments), &args); err != nil {
+		return "invalid tool arguments: " + err.Error(), true
 	}
 
-	switch toolCall.Function.Name {
+	switch toolCall.Name {
 	case "shell", "read_file", "write_file", "apply_patch":
 	default:
-		return "unknown tool: " + toolCall.Function.Name
+		return "unknown tool: " + toolCall.Name, true
 	}
 
-	requests := []policy.Request{{Tool: toolCall.Function.Name, Command: args.Command, Path: args.Path, Cwd: s.cwd}}
+	requests := []policy.Request{{Tool: toolCall.Name, Command: args.Command, Path: args.Path, Cwd: s.cwd}}
 	var hunks []patch.Hunk
 	var paths []string
-	if toolCall.Function.Name == "apply_patch" {
+	if toolCall.Name == "apply_patch" {
 		parsed, err := patch.Parse(args.Patch)
 		if err != nil {
-			return "error: invalid patch: " + err.Error()
+			return "error: invalid patch: " + err.Error(), true
 		}
 		hunks = parsed
 		paths = patch.Paths(hunks)
@@ -261,17 +229,17 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 			requests = append(requests, policy.Request{Tool: "write_file", Path: path, Cwd: s.cwd})
 		}
 	}
-	approved, denial := r.authorize(ctx, s, toolCall.Function.Name, args.Command, args.Justification, requests)
+	approved, denial := r.authorize(ctx, s, toolCall.Name, args.Command, args.Justification, requests)
 	if denial != "" {
-		return denial
+		return denial, true
 	}
 
 	beginEvent := map[string]any{
 		"type":    "exec_command_begin",
 		"call_id": toolCall.ID,
-		"tool":    toolCall.Function.Name,
+		"tool":    toolCall.Name,
 	}
-	switch toolCall.Function.Name {
+	switch toolCall.Name {
 	case "shell":
 		beginEvent["command"] = args.Command
 	case "apply_patch":
@@ -281,17 +249,17 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 	}
 
 	var exitCode *int
-	if toolCall.Function.Name == "shell" {
+	if toolCall.Name == "shell" {
 		unknownExitCode := -1
 		exitCode = &unknownExitCode
 	}
 	var toolErr error
 	defer func() {
-		r.emitExecEnd(ctx, s, toolCall.ID, toolCall.Function.Name, exitCode, toolErr, paths)
+		r.emitExecEnd(ctx, s, toolCall.ID, toolCall.Name, exitCode, toolErr, paths)
 	}()
 	r.Emitter.Emit(ctx, s.ID, beginEvent)
 
-	switch toolCall.Function.Name {
+	switch toolCall.Name {
 	case "shell":
 		timeout := time.Duration(args.TimeoutSeconds) * time.Second
 		var out string
@@ -310,25 +278,25 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		if err != nil {
 			result += fmt.Sprintf("\n[error: %s]", err)
 		}
-		return result
+		return result, err != nil
 
 	case "read_file":
 		content, err := tools.ReadFileRange(ctx, s.cwd, args.Path, args.Offset, args.Limit)
 		toolErr = err
 
 		if err != nil {
-			return "error: " + err.Error()
+			return "error: " + err.Error(), true
 		}
-		return content
+		return content, false
 
 	case "write_file":
 		err := tools.WriteFile(s.cwd, args.Path, args.Content)
 		toolErr = err
 
 		if err != nil {
-			return "error: " + err.Error()
+			return "error: " + err.Error(), true
 		}
-		return fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)
+		return fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path), false
 
 	case "apply_patch":
 		changes, err := patch.Plan(s.cwd, hunks)
@@ -339,14 +307,14 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		if err != nil {
 			result := "error: " + err.Error()
 			recordPatchApplied(s, toolCall.ID, nil, result, err)
-			return result
+			return result, true
 		}
 		result := patch.Summary(changes)
 		recordPatchApplied(s, toolCall.ID, changes, result, nil)
-		return result
+		return result, false
 	}
 
-	return "unknown tool: " + toolCall.Function.Name
+	return "unknown tool: " + toolCall.Name, true
 }
 
 // authorize evaluates every request; any Deny rejects the call, and all

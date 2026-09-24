@@ -14,46 +14,40 @@ import (
 	"time"
 
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
-	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
 	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
-
-	openai "github.com/sashabaranov/go-openai"
 )
 
 type stubTurn struct {
-	result *chatcompletions.TurnResult
+	result *provider.TurnResult
 	err    error
 	deltas []string
 }
 
-type stubClient struct {
+type stubProvider struct {
 	mu       sync.Mutex
 	turns    []stubTurn
-	requests []openai.ChatCompletionRequest
+	requests []provider.TurnRequest
 	block    <-chan struct{}
 	entered  chan<- struct{}
 }
 
-func (c *stubClient) ChatTurn(
-	ctx context.Context,
-	req openai.ChatCompletionRequest,
-	onDelta func(string),
-) (*chatcompletions.TurnResult, error) {
-	c.mu.Lock()
-	requestCopy := req
-	requestCopy.Messages = append([]openai.ChatCompletionMessage(nil), req.Messages...)
-	requestCopy.Tools = append([]openai.Tool(nil), req.Tools...)
-	c.requests = append(c.requests, requestCopy)
-	if len(c.turns) == 0 {
-		c.mu.Unlock()
-		return nil, errors.New("stub client has no queued turn")
-	}
-	turn := c.turns[0]
-	c.turns = c.turns[1:]
-	block := c.block
-	entered := c.entered
-	c.mu.Unlock()
+func (p *stubProvider) Name() string { return "stub" }
 
+func (p *stubProvider) Turn(ctx context.Context, req provider.TurnRequest, onDelta func(string)) (*provider.TurnResult, error) {
+	p.mu.Lock()
+	copied := req
+	copied.Messages = append([]provider.Message(nil), req.Messages...)
+	copied.Tools = append([]provider.ToolSpec(nil), req.Tools...)
+	p.requests = append(p.requests, copied)
+	if len(p.turns) == 0 {
+		p.mu.Unlock()
+		return nil, errors.New("stub provider has no queued turn")
+	}
+	turn := p.turns[0]
+	p.turns = p.turns[1:]
+	block, entered := p.block, p.entered
+	p.mu.Unlock()
 	if entered != nil {
 		select {
 		case entered <- struct{}{}:
@@ -70,15 +64,13 @@ func (c *stubClient) ChatTurn(
 	for _, delta := range turn.deltas {
 		onDelta(delta)
 	}
-
 	return turn.result, turn.err
 }
 
-func (c *stubClient) recordedRequests() []openai.ChatCompletionRequest {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return append([]openai.ChatCompletionRequest(nil), c.requests...)
+func (p *stubProvider) recordedRequests() []provider.TurnRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]provider.TurnRequest(nil), p.requests...)
 }
 
 type recEmitter struct {
@@ -152,10 +144,10 @@ func (a *stubApprover) recordedRequests() []ApprovalRequest {
 }
 
 func TestRunnerPureTextOneTurn(t *testing.T) {
-	client := &stubClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "done"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "done"}}}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "finish the task")
 	if err != nil {
@@ -172,7 +164,7 @@ func TestRunnerPureTextOneTurn(t *testing.T) {
 		t.Fatalf("event types = %v", gotTypes)
 	}
 	lastMessage := session.messages[len(session.messages)-1]
-	if lastMessage.Role != openai.ChatMessageRoleAssistant || lastMessage.Content != "done" {
+	if lastMessage.Role != provider.RoleAssistant || lastMessage.Text != "done" {
 		t.Fatalf("last message = %#v", lastMessage)
 	}
 }
@@ -189,9 +181,9 @@ func TestRunnerIncludesReasoningEffort(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &stubClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "done"}}}}
+			client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "done"}}}}
 			session := newTestSession(t, test.options)
-			runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+			runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 			if _, err := runner.Run(context.Background(), session, "finish the task"); err != nil {
 				t.Fatalf("Run() error = %v", err)
@@ -201,8 +193,8 @@ func TestRunnerIncludesReasoningEffort(t *testing.T) {
 			if len(requests) != 1 {
 				t.Fatalf("request count = %d, want 1", len(requests))
 			}
-			if requests[0].ReasoningEffort != test.want {
-				t.Fatalf("request reasoning effort = %q, want %q", requests[0].ReasoningEffort, test.want)
+			if requests[0].Effort != test.want {
+				t.Fatalf("request reasoning effort = %q, want %q", requests[0].Effort, test.want)
 			}
 		})
 	}
@@ -210,9 +202,9 @@ func TestRunnerIncludesReasoningEffort(t *testing.T) {
 
 func TestRunnerShellToolCallThenText(t *testing.T) {
 	call := toolCall("call-shell", "shell", `{"command":"echo hi"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "ok"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "ok"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
@@ -220,7 +212,7 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "say hi")
 	if err != nil {
@@ -235,8 +227,8 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
 	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
-	if !strings.Contains(toolMessage.Content, "hi") {
-		t.Fatalf("tool result = %q, want it to contain hi", toolMessage.Content)
+	if !strings.Contains(toolMessage.Text, "hi") {
+		t.Fatalf("tool result = %q, want it to contain hi", toolMessage.Text)
 	}
 
 	events := emitter.recordedEvents()
@@ -264,12 +256,16 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 
 func TestRunnerPassesReasoningBackInHistory(t *testing.T) {
 	call := toolCall("call-1", "shell", `{"command":"echo hi"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{Reasoning: "plan A", ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "done"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{
+			Reasoning: "plan A",
+			ToolCalls: []provider.ToolCall{call},
+			Opaque:    json.RawMessage(`{"r":"plan A"}`),
+		}},
+		{result: &provider.TurnResult{Text: "done"}},
 	}}
 	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
-	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "use a tool"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -280,10 +276,10 @@ func TestRunnerPassesReasoningBackInHistory(t *testing.T) {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
 
-	var assistant *openai.ChatCompletionMessage
+	var assistant *provider.Message
 	for i := range requests[1].Messages {
 		message := &requests[1].Messages[i]
-		if message.Role == openai.ChatMessageRoleAssistant && len(message.ToolCalls) > 0 {
+		if message.Role == provider.RoleAssistant && len(message.ToolCalls) > 0 {
 			assistant = message
 			break
 		}
@@ -291,8 +287,8 @@ func TestRunnerPassesReasoningBackInHistory(t *testing.T) {
 	if assistant == nil {
 		t.Fatalf("no assistant message carrying a tool call in %#v", requests[1].Messages)
 	}
-	if assistant.ReasoningContent != "plan A" {
-		t.Fatalf("assistant ReasoningContent = %q, want %q", assistant.ReasoningContent, "plan A")
+	if string(assistant.Opaque) != `{"r":"plan A"}` {
+		t.Fatalf("assistant Opaque = %s, want %s", assistant.Opaque, `{"r":"plan A"}`)
 	}
 }
 
@@ -303,36 +299,36 @@ func TestRunnerEmptyFileResultHasNonEmptyToolContent(t *testing.T) {
 	}
 
 	call := toolCall("call-empty", "read_file", `{"path":"empty.txt"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "empty file handled"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "empty file handled"}},
 	}}
 	session := newTestSession(t, Options{
 		Cwd:      cwd,
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "read empty.txt"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	requests := client.recordedRequests()
 	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
-	if toolMessage.Content == "" {
-		t.Fatal("empty file produced a tool message with empty Content")
+	if toolMessage.Text == "" {
+		t.Fatal("empty file produced a tool message with empty Text")
 	}
-	if toolMessage.Content != "(empty output)" {
-		t.Fatalf("empty file tool result = %q, want %q", toolMessage.Content, "(empty output)")
+	if toolMessage.Text != "(empty output)" {
+		t.Fatalf("empty file tool result = %q, want %q", toolMessage.Text, "(empty output)")
 	}
 }
 
 func TestRunnerApprovalDenied(t *testing.T) {
 	const justification = "the requested change needs a file write"
 	call := toolCall("call-write", "write_file", `{"path":"out.txt","content":"hello","justification":"`+justification+`"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "blocked but finished"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "blocked but finished"}},
 	}}
 	emitter := &recEmitter{}
 	approver := &stubApprover{approved: false}
@@ -341,7 +337,7 @@ func TestRunnerApprovalDenied(t *testing.T) {
 		Sandbox:  policy.Sandbox("read-only"),
 		Approval: policy.ApprovalPolicy("on-request"),
 	})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: approver}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: approver}
 
 	got, err := runner.Run(context.Background(), session, "write a file")
 	if err != nil {
@@ -352,8 +348,11 @@ func TestRunnerApprovalDenied(t *testing.T) {
 	}
 	requests := client.recordedRequests()
 	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
-	if !strings.Contains(toolMessage.Content, "approval was not granted") {
-		t.Fatalf("tool result = %q", toolMessage.Content)
+	if !strings.Contains(toolMessage.Text, "approval was not granted") {
+		t.Fatalf("tool result = %q", toolMessage.Text)
+	}
+	if !toolMessage.IsError {
+		t.Fatalf("approval denial tool message = %#v, want IsError", toolMessage)
 	}
 	assertNoExecEvents(t, emitter.recordedEvents())
 
@@ -373,9 +372,9 @@ func TestRunnerApprovalDenied(t *testing.T) {
 func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 	call := toolCall("call-panic", "shell", `{"command":"echo should-not-run"}`)
 	afterPanicCall := toolCall("call-after-panic", "shell", `{"command":"echo after-panic"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call, afterPanicCall}}},
-		{result: &chatcompletions.TurnResult{Content: "recovered"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call, afterPanicCall}}},
+		{result: &provider.TurnResult{Text: "recovered"}},
 	}}
 	recorder := &recEmitter{}
 	emitter := &panicOnceEmitter{recorder: recorder, panicType: "exec_command_begin"}
@@ -384,7 +383,7 @@ func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "trigger a tool panic")
 	if err != nil {
@@ -399,13 +398,16 @@ func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
 	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
-	if !strings.Contains(toolMessage.Content, "tool execution panicked") ||
-		!strings.Contains(toolMessage.Content, "emitter boom") {
-		t.Fatalf("panic tool result = %q", toolMessage.Content)
+	if !strings.Contains(toolMessage.Text, "tool execution panicked") ||
+		!strings.Contains(toolMessage.Text, "emitter boom") {
+		t.Fatalf("panic tool result = %q", toolMessage.Text)
+	}
+	if !toolMessage.IsError {
+		t.Fatalf("panic tool message = %#v, want IsError", toolMessage)
 	}
 	afterPanicMessage := findToolMessage(t, requests[1].Messages, afterPanicCall.ID)
-	if !strings.Contains(afterPanicMessage.Content, "after-panic") {
-		t.Fatalf("post-panic tool result = %q", afterPanicMessage.Content)
+	if !strings.Contains(afterPanicMessage.Text, "after-panic") {
+		t.Fatalf("post-panic tool result = %q", afterPanicMessage.Text)
 	}
 	assertCompleteToolHistory(t, requests[1].Messages)
 
@@ -432,9 +434,9 @@ func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 
 func TestRunnerNeverPolicyDenial(t *testing.T) {
 	call := toolCall("call-rm", "shell", `{"command":"rm x"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "not removed"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "not removed"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
@@ -442,15 +444,18 @@ func TestRunnerNeverPolicyDenial(t *testing.T) {
 		Sandbox:  policy.Sandbox("read-only"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{approved: true}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{approved: true}}
 
 	if _, err := runner.Run(context.Background(), session, "remove x"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	requests := client.recordedRequests()
 	toolMessage := findToolMessage(t, requests[1].Messages, call.ID)
-	if !strings.Contains(toolMessage.Content, "denied by sandbox policy") {
-		t.Fatalf("tool result = %q", toolMessage.Content)
+	if !strings.Contains(toolMessage.Text, "denied by sandbox policy") {
+		t.Fatalf("tool result = %q", toolMessage.Text)
+	}
+	if !toolMessage.IsError {
+		t.Fatalf("policy denial tool message = %#v, want IsError", toolMessage)
 	}
 	assertNoExecEvents(t, emitter.recordedEvents())
 }
@@ -458,10 +463,10 @@ func TestRunnerNeverPolicyDenial(t *testing.T) {
 func TestRunnerTurnLimitReachedThenResumed(t *testing.T) {
 	firstCall := toolCall("call-one", "shell", `{"command":"echo one"}`)
 	secondCall := toolCall("call-two", "shell", `{"command":"echo two"}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{firstCall}}},
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{secondCall}}},
-		{result: &chatcompletions.TurnResult{Content: "resumed"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{firstCall}}},
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{secondCall}}},
+		{result: &provider.TurnResult{Text: "resumed"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
@@ -470,7 +475,7 @@ func TestRunnerTurnLimitReachedThenResumed(t *testing.T) {
 		Approval: policy.ApprovalPolicy("never"),
 		MaxTurns: 2,
 	})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "keep using tools")
 	if got != "" {
@@ -502,7 +507,7 @@ func TestExecToolCallRejectsInvalidModelOutput(t *testing.T) {
 
 	tests := []struct {
 		name string
-		call openai.ToolCall
+		call provider.ToolCall
 		want string
 	}{
 		{
@@ -518,24 +523,86 @@ func TestExecToolCallRejectsInvalidModelOutput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := runner.execToolCall(context.Background(), session, test.call)
+			got, isError := runner.execToolCall(context.Background(), session, test.call)
 			if !strings.Contains(got, test.want) {
 				t.Fatalf("execToolCall() = %q, want it to contain %q", got, test.want)
 			}
+			if !isError {
+				t.Fatalf("execToolCall() isError = false, want true for %q", got)
+			}
 		})
+	}
+}
+
+func TestRunnerStoresOpaqueAndMarksToolErrors(t *testing.T) {
+	denied := provider.ToolCall{ID: "c1", Name: "write_file", Arguments: `{"path":"../x","content":"y"}`}
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{denied}, Opaque: json.RawMessage(`{"k":1}`)}},
+		{result: &provider.TurnResult{Text: "ok"}},
+	}}
+	session := newTestSession(t, Options{Sandbox: "workspace-write", Approval: "never"})
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	if _, err := runner.Run(context.Background(), session, "go"); err != nil {
+		t.Fatal(err)
+	}
+	history := client.recordedRequests()[1].Messages
+	assistant, tool := history[1], history[2]
+	if string(assistant.Opaque) != `{"k":1}` {
+		t.Fatalf("assistant opaque = %s", assistant.Opaque)
+	}
+	if tool.Role != provider.RoleTool || !tool.IsError || !strings.Contains(tool.Text, "denied") {
+		t.Fatalf("tool message = %#v", tool)
+	}
+}
+
+func TestRunnerShellNonZeroExitIsNotToolError(t *testing.T) {
+	call := provider.ToolCall{ID: "c1", Name: "shell", Arguments: `{"command":"exit 3"}`}
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "ok"}},
+	}}
+	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	if _, err := runner.Run(context.Background(), session, "go"); err != nil {
+		t.Fatal(err)
+	}
+	tool := client.recordedRequests()[1].Messages[2]
+	if tool.IsError || !strings.HasPrefix(tool.Text, "exit code: 3") {
+		t.Fatalf("tool message = %#v", tool)
+	}
+}
+
+func TestRunnerRejectsTruncatedToolArguments(t *testing.T) {
+	call := provider.ToolCall{ID: "c1", Name: "shell", Arguments: `{"command":"ls`}
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "ok"}},
+	}}
+	emitter := &recEmitter{}
+	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	if _, err := runner.Run(context.Background(), session, "go"); err != nil {
+		t.Fatal(err)
+	}
+	tool := client.recordedRequests()[1].Messages[2]
+	if !tool.IsError || !strings.HasPrefix(tool.Text, "invalid tool arguments:") {
+		t.Fatalf("tool message = %#v", tool)
+	}
+	if containsEventType(t, emitter.recordedEvents(), "exec_command_begin") {
+		t.Fatal("truncated arguments must not execute the tool")
 	}
 }
 
 func TestRunnerBusy(t *testing.T) {
 	unblock := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	client := &stubClient{
-		turns:   []stubTurn{{result: &chatcompletions.TurnResult{Content: "first done"}}},
+	client := &stubProvider{
+		turns:   []stubTurn{{result: &provider.TurnResult{Text: "first done"}}},
 		block:   unblock,
 		entered: entered,
 	}
 	session := newTestSession(t, Options{})
-	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	firstResult := make(chan struct {
 		answer string
@@ -597,11 +664,11 @@ func TestManagerBasics(t *testing.T) {
 	if got, ok := manager.Get(first.ID); !ok || got != first {
 		t.Fatalf("Get(first.ID) = (%#v, %v), want first session", got, ok)
 	}
-	if first.model != "deepseek-v4-pro" || first.maxTurns != DefaultMaxTurns {
-		t.Fatalf("defaults = model %q, max turns %d", first.model, first.maxTurns)
+	if first.model != "deepseek-v4-pro" || first.maxTurns != DefaultMaxTurns || first.system != DefaultSystemPrompt {
+		t.Fatalf("defaults = model %q, max turns %d, system %q", first.model, first.maxTurns, first.system)
 	}
-	if len(first.messages) != 1 || first.messages[0].Role != openai.ChatMessageRoleSystem || first.messages[0].Content != DefaultSystemPrompt {
-		t.Fatalf("initial messages = %#v", first.messages)
+	if len(first.messages) != 0 {
+		t.Fatalf("initial messages = %#v, want none", first.messages)
 	}
 }
 
@@ -613,6 +680,12 @@ func TestManagerReasoningEffort(t *testing.T) {
 	}
 	if got := manager.Create(Options{ReasoningEffort: "low"}).reasoningEffort; got != "low" {
 		t.Fatalf("explicit reasoning effort = %q, want %q", got, "low")
+	}
+	if got := manager.Create(Options{ReasoningEffort: "low"}).effortSent; got != "low" {
+		t.Fatalf("effort sent default = %q, want it to default to the requested %q", got, "low")
+	}
+	if got := manager.Create(Options{ReasoningEffort: "xhigh", EffortSent: "max"}).effortSent; got != "max" {
+		t.Fatalf("explicit effort sent = %q, want %q", got, "max")
 	}
 }
 
@@ -677,9 +750,9 @@ func TestManagerCapsSessionCount(t *testing.T) {
 }
 
 func TestRunnerUpdatesLastUsed(t *testing.T) {
-	client := &stubClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "done"}}}}
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "done"}}}}
 	session := newTestSession(t, Options{})
-	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	before := time.Now()
 	if _, err := runner.Run(context.Background(), session, "finish the task"); err != nil {
@@ -691,18 +764,18 @@ func TestRunnerUpdatesLastUsed(t *testing.T) {
 }
 
 func TestRunnerClientErrorPreservesSessionAndUnlocks(t *testing.T) {
-	client := &stubClient{turns: []stubTurn{
+	client := &stubProvider{turns: []stubTurn{
 		{err: errors.New("upstream failed")},
-		{result: &chatcompletions.TurnResult{Content: "recovered"}},
+		{result: &provider.TurnResult{Text: "recovered"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "first prompt"); err == nil || err.Error() != "upstream failed" {
 		t.Fatalf("first Run() error = %v", err)
 	}
-	if len(session.messages) != 2 || session.messages[1].Content != "first prompt" {
+	if len(session.messages) != 1 || session.messages[0].Role != provider.RoleUser || session.messages[0].Text != "first prompt" {
 		t.Fatalf("messages after client error = %#v", session.messages)
 	}
 	if gotTypes := eventTypes(t, emitter.recordedEvents()); !reflect.DeepEqual(gotTypes, []string{"task_started", "error"}) {
@@ -713,26 +786,26 @@ func TestRunnerClientErrorPreservesSessionAndUnlocks(t *testing.T) {
 	if err != nil || got != "recovered" {
 		t.Fatalf("second Run() = (%q, %v)", got, err)
 	}
-	if len(session.messages) != 4 {
-		t.Fatalf("message count after recovery = %d, want 4", len(session.messages))
+	if len(session.messages) != 3 {
+		t.Fatalf("message count after recovery = %d, want 3", len(session.messages))
 	}
 }
 
 func TestRunnerEmitsDeltasAndUsageInOrder(t *testing.T) {
-	client := &stubClient{turns: []stubTurn{{
-		result: &chatcompletions.TurnResult{
-			Content: "done",
-			Usage: &openai.Usage{
-				PromptTokens:     7,
-				CompletionTokens: 5,
-				TotalTokens:      12,
+	client := &stubProvider{turns: []stubTurn{{
+		result: &provider.TurnResult{
+			Text: "done",
+			Usage: &provider.Usage{
+				Input:  7,
+				Output: 5,
+				Total:  12,
 			},
 		},
 		deltas: []string{"do", "ne"},
 	}}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{})
-	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "stream"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -757,7 +830,7 @@ func TestRunnerEmitsDeltasAndUsageInOrder(t *testing.T) {
 }
 
 func TestBuiltinTools(t *testing.T) {
-	tools := builtinTools()
+	tools := BuiltinTools()
 	if len(tools) != 4 {
 		t.Fatalf("builtin tool count = %d, want 4", len(tools))
 	}
@@ -769,17 +842,12 @@ func TestBuiltinTools(t *testing.T) {
 		"apply_patch": {"patch"},
 	}
 	for _, tool := range tools {
-		if tool.Type != openai.ToolTypeFunction || tool.Function == nil {
+		if tool.Name == "" || tool.Description == "" || tool.Parameters == nil {
 			t.Fatalf("invalid tool declaration: %#v", tool)
 		}
-		definition := tool.Function
-		if !strings.Contains(strings.ToLower(definition.Description), "sandbox policy") ||
-			!strings.Contains(strings.ToLower(definition.Description), "justification") {
-			t.Errorf("%s description does not explain sandbox/justification: %q", definition.Name, definition.Description)
-		}
-		raw, ok := definition.Parameters.(json.RawMessage)
-		if !ok {
-			t.Fatalf("%s Parameters type = %T, want json.RawMessage", definition.Name, definition.Parameters)
+		if !strings.Contains(strings.ToLower(tool.Description), "sandbox policy") ||
+			!strings.Contains(strings.ToLower(tool.Description), "justification") {
+			t.Errorf("%s description does not explain sandbox/justification: %q", tool.Name, tool.Description)
 		}
 		var schema struct {
 			Type       string `json:"type"`
@@ -789,25 +857,25 @@ func TestBuiltinTools(t *testing.T) {
 			} `json:"properties"`
 			Required []string `json:"required"`
 		}
-		if err := json.Unmarshal(raw, &schema); err != nil {
-			t.Fatalf("decode %s schema: %v", definition.Name, err)
+		if err := json.Unmarshal(tool.Parameters, &schema); err != nil {
+			t.Fatalf("decode %s schema: %v", tool.Name, err)
 		}
 		if schema.Type != "object" {
-			t.Errorf("%s schema type = %q", definition.Name, schema.Type)
+			t.Errorf("%s schema type = %q", tool.Name, schema.Type)
 		}
-		if !reflect.DeepEqual(schema.Required, wantRequired[definition.Name]) {
-			t.Errorf("%s required = %v, want %v", definition.Name, schema.Required, wantRequired[definition.Name])
+		if !reflect.DeepEqual(schema.Required, wantRequired[tool.Name]) {
+			t.Errorf("%s required = %v, want %v", tool.Name, schema.Required, wantRequired[tool.Name])
 		}
 		if _, ok := schema.Properties["justification"]; !ok {
-			t.Errorf("%s schema lacks justification", definition.Name)
+			t.Errorf("%s schema lacks justification", tool.Name)
 		}
-		if definition.Name == "shell" {
+		if tool.Name == "shell" {
 			timeout := schema.Properties["timeout_seconds"]
 			if timeout.Type != "integer" || !strings.Contains(timeout.Description, "clamped, max 600") {
 				t.Errorf("shell timeout_seconds = %#v", timeout)
 			}
 		}
-		if definition.Name == "read_file" {
+		if tool.Name == "read_file" {
 			offset := schema.Properties["offset"]
 			if offset.Type != "integer" || !strings.Contains(offset.Description, "1-based") {
 				t.Errorf("read_file offset = %#v", offset)
@@ -827,17 +895,17 @@ func runPatchOnce(t *testing.T, options Options, approver *stubApprover, patchTe
 		t.Fatal(err)
 	}
 	call := toolCall("call-patch", "apply_patch", string(arguments))
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "done"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "done"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, options)
-	runner := &Runner{Client: client, Emitter: emitter, Approver: approver}
+	runner := &Runner{Provider: client, Emitter: emitter, Approver: approver}
 	if _, err := runner.Run(context.Background(), session, "patch it"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	return findToolMessage(t, client.recordedRequests()[1].Messages, call.ID).Content, emitter
+	return findToolMessage(t, client.recordedRequests()[1].Messages, call.ID).Text, emitter
 }
 
 func TestRunnerApplyPatchUpdatesFile(t *testing.T) {
@@ -921,26 +989,23 @@ func newTestSession(t *testing.T, options Options) *Session {
 	return NewManager().Create(options)
 }
 
-func toolCall(id, name, arguments string) openai.ToolCall {
-	return openai.ToolCall{
-		ID:   id,
-		Type: openai.ToolTypeFunction,
-		Function: openai.FunctionCall{
-			Name:      name,
-			Arguments: arguments,
-		},
+func toolCall(id, name, arguments string) provider.ToolCall {
+	return provider.ToolCall{
+		ID:        id,
+		Name:      name,
+		Arguments: arguments,
 	}
 }
 
-func findToolMessage(t *testing.T, messages []openai.ChatCompletionMessage, callID string) openai.ChatCompletionMessage {
+func findToolMessage(t *testing.T, messages []provider.Message, callID string) provider.Message {
 	t.Helper()
 	for _, message := range messages {
-		if message.Role == openai.ChatMessageRoleTool && message.ToolCallID == callID {
+		if message.Role == provider.RoleTool && message.ToolCallID == callID {
 			return message
 		}
 	}
 	t.Fatalf("no tool message found for call ID %q in %#v", callID, messages)
-	return openai.ChatCompletionMessage{}
+	return provider.Message{}
 }
 
 func eventTypes(t *testing.T, events []map[string]any) []string {
@@ -975,22 +1040,22 @@ func assertNoExecEvents(t *testing.T, events []map[string]any) {
 	}
 }
 
-func assertCompleteToolHistory(t *testing.T, messages []openai.ChatCompletionMessage) {
+func assertCompleteToolHistory(t *testing.T, messages []provider.Message) {
 	t.Helper()
 
-	toolResponses := make(map[string][]openai.ChatCompletionMessage)
+	toolResponses := make(map[string][]provider.Message)
 	for _, message := range messages {
-		if message.Role != openai.ChatMessageRoleTool {
+		if message.Role != provider.RoleTool {
 			continue
 		}
-		if message.Content == "" {
-			t.Fatalf("tool response %q has empty Content", message.ToolCallID)
+		if message.Text == "" {
+			t.Fatalf("tool response %q has empty Text", message.ToolCallID)
 		}
 		toolResponses[message.ToolCallID] = append(toolResponses[message.ToolCallID], message)
 	}
 
 	for _, message := range messages {
-		if message.Role != openai.ChatMessageRoleAssistant {
+		if message.Role != provider.RoleAssistant {
 			continue
 		}
 		for _, call := range message.ToolCalls {
@@ -1005,16 +1070,16 @@ func assertCompleteToolHistory(t *testing.T, messages []openai.ChatCompletionMes
 func runShellOnce(t *testing.T, options Options, approver *stubApprover, command string) string {
 	t.Helper()
 	call := toolCall("call-shell", "shell", `{"command":`+strconv.Quote(command)+`}`)
-	client := &stubClient{turns: []stubTurn{
-		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &chatcompletions.TurnResult{Content: "done"}},
+	client := &stubProvider{turns: []stubTurn{
+		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+		{result: &provider.TurnResult{Text: "done"}},
 	}}
 	session := newTestSession(t, options)
-	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: approver}
+	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: approver}
 	if _, err := runner.Run(context.Background(), session, "run it"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	return findToolMessage(t, client.recordedRequests()[1].Messages, call.ID).Content
+	return findToolMessage(t, client.recordedRequests()[1].Messages, call.ID).Text
 }
 
 func TestRunnerShellSandboxing(t *testing.T) {

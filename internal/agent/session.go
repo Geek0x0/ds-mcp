@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
 	"github.com/Geek0x0/subagent-mcp/internal/rollout"
 
 	"github.com/google/uuid"
-	openai "github.com/sashabaranov/go-openai"
 )
 
 const DefaultMaxTurns = 50
@@ -30,15 +30,15 @@ const DefaultSystemPrompt = `You are subagent-mcp, a coding agent powered by Dee
 Work autonomously on the task you are given: inspect what you need, make the smallest change that satisfies the request, and verify it when possible. Some calls may be denied by the sandbox policy or the user; when that happens, adapt your approach or explain the blocker instead of repeating the same call. When the task is done, reply WITHOUT any tool call: summarize what you did, list changed files, and how you verified the result.`
 
 type Options struct {
-	Model                    string
-	ReasoningEffort          string
-	RequestedReasoningEffort string
-	Cwd                      string
-	Sandbox                  policy.Sandbox
-	Approval                 policy.ApprovalPolicy
-	SystemPrompt             string
-	MaxTurns                 int
-	WritableRoots            []string
+	Model           string
+	ReasoningEffort string
+	EffortSent      string
+	Cwd             string
+	Sandbox         policy.Sandbox
+	Approval        policy.ApprovalPolicy
+	SystemPrompt    string
+	MaxTurns        int
+	WritableRoots   []string
 }
 
 type Session struct {
@@ -46,16 +46,17 @@ type Session struct {
 
 	model           string
 	reasoningEffort string
-	requestedEffort string
+	effortSent      string
+	system          string
 	cwd             string
 	sandbox         policy.Sandbox
 	approval        policy.ApprovalPolicy
 	maxTurns        int
 	writableRoots   []string
-	messages        []openai.ChatCompletionMessage
+	messages        []provider.Message
 	rollout         *rollout.Recorder
 	turnID          string
-	totalUsage      tokenUsage
+	totalUsage      provider.Usage
 	lastUsed        time.Time
 	mu              sync.Mutex
 }
@@ -83,25 +84,22 @@ func (m *Manager) Create(o Options) *Session {
 	if o.SystemPrompt == "" {
 		o.SystemPrompt = DefaultSystemPrompt
 	}
-	if o.RequestedReasoningEffort == "" {
-		o.RequestedReasoningEffort = o.ReasoningEffort
+	if o.EffortSent == "" {
+		o.EffortSent = o.ReasoningEffort
 	}
 
 	session := &Session{
 		ID:              uuid.NewString(),
 		model:           o.Model,
 		reasoningEffort: o.ReasoningEffort,
-		requestedEffort: o.RequestedReasoningEffort,
+		effortSent:      o.EffortSent,
+		system:          o.SystemPrompt,
 		cwd:             o.Cwd,
 		sandbox:         o.Sandbox,
 		approval:        o.Approval,
 		maxTurns:        o.MaxTurns,
 		writableRoots:   append([]string(nil), o.WritableRoots...),
-		messages: []openai.ChatCompletionMessage{{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: o.SystemPrompt,
-		}},
-		lastUsed: m.now(),
+		lastUsed:        m.now(),
 	}
 
 	m.mu.Lock()

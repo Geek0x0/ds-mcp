@@ -14,6 +14,7 @@ import (
 
 type TurnResult struct {
 	Content   string
+	Reasoning string
 	ToolCalls []openai.ToolCall
 	Usage     *openai.Usage
 }
@@ -56,6 +57,7 @@ func (c *Client) ChatTurn(
 	defer stream.Close()
 
 	var content strings.Builder
+	var reasoning strings.Builder
 	toolCallsByIndex := make(map[int]*openai.ToolCall)
 	var usage *openai.Usage
 
@@ -75,6 +77,9 @@ func (c *Client) ChatTurn(
 
 		for _, choice := range response.Choices {
 			delta := choice.Delta
+			if delta.ReasoningContent != "" {
+				reasoning.WriteString(delta.ReasoningContent)
+			}
 			if delta.Content != "" {
 				content.WriteString(delta.Content)
 				if onDelta != nil {
@@ -118,6 +123,7 @@ func (c *Client) ChatTurn(
 
 	return &TurnResult{
 		Content:   content.String(),
+		Reasoning: reasoning.String(),
 		ToolCalls: sortedToolCalls(toolCallsByIndex),
 		Usage:     usage,
 	}, nil

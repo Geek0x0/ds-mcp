@@ -27,6 +27,7 @@ type FakeToolCall struct {
 // ToolCalls are mutually exclusive.
 type FakeTurn struct {
 	Status    int
+	Reasoning string
 	Text      string
 	ToolCalls []FakeToolCall
 }
@@ -121,6 +122,16 @@ func (f *FakeDeepSeek) handleChatCompletions(w http.ResponseWriter, r *http.Requ
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
+
+	if turn.Reasoning != "" {
+		if !f.writeChunk(w, flusher, openai.ChatCompletionStreamResponse{
+			Choices: []openai.ChatCompletionStreamChoice{{
+				Delta: openai.ChatCompletionStreamChoiceDelta{ReasoningContent: turn.Reasoning},
+			}},
+		}) {
+			return
+		}
+	}
 
 	if len(turn.ToolCalls) == 0 {
 		first, second := splitInHalf(turn.Text)

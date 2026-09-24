@@ -291,3 +291,19 @@ func newToolCallStream(t *testing.T, call openai.ToolCall) *httptest.Server {
 
 	return server
 }
+
+func TestChatTurnCapturesReasoningSeparately(t *testing.T) {
+	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{Reasoning: "think first", Text: "answer"}})
+	client := newTestClient(fake.URL)
+
+	result, err := client.ChatTurn(context.Background(), openai.ChatCompletionRequest{
+		Model:    "deepseek-v4-pro",
+		Messages: []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("ChatTurn() error = %v", err)
+	}
+	if result.Reasoning != "think first" || result.Content != "answer" {
+		t.Fatalf("ChatTurn() = %#v", result)
+	}
+}

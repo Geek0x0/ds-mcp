@@ -790,6 +790,68 @@ func TestHandleDeepseekAcceptsWritableRoots(t *testing.T) {
 	}
 }
 
+func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("DS_MCP_ROLLOUT", "")
+	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+	s := New(client, "9.9.9")
+
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "hello",
+		"cwd":    t.TempDir(),
+		"config": map[string]any{"model_reasoning_effort": "xhigh"},
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+	}
+	threadID := toolResultThreadID(t, result)
+
+	matches, _ := filepath.Glob(filepath.Join(home, "sessions", "*", "*", "*", "rollout-*-"+threadID+".jsonl"))
+	if len(matches) != 1 {
+		t.Fatalf("rollout files = %v", matches)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var meta, turn struct {
+		Type    string         `json:"type"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &turn); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Type != "session_meta" || meta.Payload["id"] != threadID || meta.Payload["cli_version"] != "9.9.9" ||
+		meta.Payload["originator"] != "ds-mcp" || meta.Payload["model_provider"] != "deepseek" || meta.Payload["source"] != "mcp" {
+		t.Fatalf("session_meta = %#v", meta)
+	}
+	if turn.Type != "turn_context" || turn.Payload["effort"] != "xhigh" {
+		t.Fatalf("turn_context = %#v", turn)
+	}
+}
+
+func TestHandleDeepseekRolloutOffWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("DS_MCP_ROLLOUT", "off")
+	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+	s := New(client, "test")
+	if result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "hello",
+		"cwd":    t.TempDir(),
+	})); err != nil || result.IsError {
+		t.Fatalf("handleDeepseek() = (%#v, %v)", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("sessions dir created with DS_MCP_ROLLOUT=off")
+	}
+}
+
 func callToolRequest(name string, arguments map[string]any) mcp.CallToolRequest {
 	return mcp.CallToolRequest{
 		Request: mcp.Request{},

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/Geek0x0/ds-mcp/internal/policy"
+	"github.com/Geek0x0/ds-mcp/internal/rollout"
 
 	"github.com/google/uuid"
 	openai "github.com/sashabaranov/go-openai"
@@ -22,14 +23,15 @@ const DefaultSystemPrompt = `You are ds-mcp, a coding agent powered by DeepSeek.
 Work autonomously on the task you are given: inspect what you need, make the smallest change that satisfies the request, and verify it when possible. Some calls may be denied by the sandbox policy or the user; when that happens, adapt your approach or explain the blocker instead of repeating the same call. When the task is done, reply WITHOUT any tool call: summarize what you did, list changed files, and how you verified the result.`
 
 type Options struct {
-	Model           string
-	ReasoningEffort string
-	Cwd             string
-	Sandbox         policy.Sandbox
-	Approval        policy.ApprovalPolicy
-	SystemPrompt    string
-	MaxTurns        int
-	WritableRoots   []string
+	Model                    string
+	ReasoningEffort          string
+	RequestedReasoningEffort string
+	Cwd                      string
+	Sandbox                  policy.Sandbox
+	Approval                 policy.ApprovalPolicy
+	SystemPrompt             string
+	MaxTurns                 int
+	WritableRoots            []string
 }
 
 type Session struct {
@@ -37,12 +39,16 @@ type Session struct {
 
 	model           string
 	reasoningEffort string
+	requestedEffort string
 	cwd             string
 	sandbox         policy.Sandbox
 	approval        policy.ApprovalPolicy
 	maxTurns        int
 	writableRoots   []string
 	messages        []openai.ChatCompletionMessage
+	rollout         *rollout.Recorder
+	turnID          string
+	totalUsage      tokenUsage
 	mu              sync.Mutex
 }
 
@@ -68,11 +74,15 @@ func (m *Manager) Create(o Options) *Session {
 	if o.SystemPrompt == "" {
 		o.SystemPrompt = DefaultSystemPrompt
 	}
+	if o.RequestedReasoningEffort == "" {
+		o.RequestedReasoningEffort = o.ReasoningEffort
+	}
 
 	session := &Session{
 		ID:              uuid.NewString(),
 		model:           o.Model,
 		reasoningEffort: o.ReasoningEffort,
+		requestedEffort: o.RequestedReasoningEffort,
 		cwd:             o.Cwd,
 		sandbox:         o.Sandbox,
 		approval:        o.Approval,
@@ -97,6 +107,13 @@ func (m *Manager) Get(id string) (*Session, bool) {
 
 	session, ok := m.sessions[id]
 	return session, ok
+}
+
+// AttachRollout sets the recorder that receives this session's rollout lines.
+func (s *Session) AttachRollout(r *rollout.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rollout = r
 }
 
 // shellWritableRoots returns the Landlock writable roots for shell calls the

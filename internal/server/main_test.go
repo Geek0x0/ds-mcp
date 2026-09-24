@@ -9,5 +9,7 @@ import (
 
 func TestMain(m *testing.M) {
 	sandbox.MaybeRunHelper()
+	// Keep tests from writing into the developer's real ~/.codex.
+	os.Setenv("DS_MCP_ROLLOUT", "off")
 	os.Exit(m.Run())
 }

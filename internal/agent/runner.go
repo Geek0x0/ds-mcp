@@ -13,6 +13,7 @@ import (
 	"github.com/Geek0x0/ds-mcp/internal/policy"
 	"github.com/Geek0x0/ds-mcp/internal/tools"
 
+	"github.com/google/uuid"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -129,6 +130,9 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 	defer s.mu.Unlock()
 
 	r.Emitter.Emit(ctx, s.ID, map[string]any{"type": "task_started"})
+	started := time.Now()
+	s.turnID = uuid.NewString()
+	recordTurnStart(s, prompt, started)
 	s.messages = append(s.messages, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: prompt,
@@ -155,6 +159,7 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 				"type":    "error",
 				"message": err.Error(),
 			})
+			recordError(s, err)
 			return "", err
 		}
 		if res.Usage != nil {
@@ -165,6 +170,7 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 				"total_tokens":      res.Usage.TotalTokens,
 			})
 		}
+		recordModelTurn(s, res)
 
 		s.messages = append(s.messages, openai.ChatCompletionMessage{
 			Role:      openai.ChatMessageRoleAssistant,
@@ -177,14 +183,17 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 				"message": res.Content,
 			})
 			r.Emitter.Emit(ctx, s.ID, map[string]any{"type": "task_complete"})
+			recordTaskComplete(s, res.Content, started)
 			return res.Content, nil
 		}
 
 		for _, toolCall := range res.ToolCalls {
+			recordToolCall(s, toolCall)
 			content := r.safeExecToolCall(ctx, s, toolCall)
 			if content == "" {
 				content = "(empty output)"
 			}
+			recordToolOutput(s, toolCall, content)
 			s.messages = append(s.messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
 				ToolCallID: toolCall.ID,
@@ -198,6 +207,7 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		"type":    "error",
 		"message": err.Error(),
 	})
+	recordError(s, err)
 	return "", err
 }
 
@@ -321,9 +331,13 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		}
 		toolErr = err
 		if err != nil {
-			return "error: " + err.Error()
+			result := "error: " + err.Error()
+			recordPatchApplied(s, toolCall.ID, nil, result, err)
+			return result
 		}
-		return patch.Summary(changes)
+		result := patch.Summary(changes)
+		recordPatchApplied(s, toolCall.ID, changes, result, nil)
+		return result
 	}
 
 	return "unknown tool: " + toolCall.Function.Name

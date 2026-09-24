@@ -11,6 +11,8 @@ import (
 
 	"github.com/Geek0x0/ds-mcp/internal/agent"
 	"github.com/Geek0x0/ds-mcp/internal/policy"
+	"github.com/Geek0x0/ds-mcp/internal/repo"
+	"github.com/Geek0x0/ds-mcp/internal/rollout"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -82,13 +84,14 @@ func parseWritableRoots(config map[string]any) ([]string, error) {
 }
 
 type Server struct {
-	mcp    *mcpserver.MCPServer
-	mgr    *agent.Manager
-	runner *agent.Runner
+	mcp     *mcpserver.MCPServer
+	mgr     *agent.Manager
+	runner  *agent.Runner
+	version string
 }
 
 func New(client agent.ChatClient, version string) *Server {
-	s := &Server{mgr: agent.NewManager()}
+	s := &Server{mgr: agent.NewManager(), version: version}
 	s.mcp = mcpserver.NewMCPServer(
 		"ds-mcp",
 		version,
@@ -198,11 +201,11 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		)), nil
 	}
 
-		config, _ := arguments["config"].(map[string]any)
-		_, reasoningEffort, err := resolveReasoningEffort(arguments, config)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
+	config, _ := arguments["config"].(map[string]any)
+	requestedEffort, reasoningEffort, err := resolveReasoningEffort(arguments, config)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	var cwd string
 	if raw, present := arguments["cwd"]; present {
@@ -258,15 +261,38 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	sess := s.mgr.Create(agent.Options{
-		Model:           req.GetString("model", ""),
-		Cwd:             cwd,
-		Sandbox:         sandbox,
-		Approval:        approval,
-		ReasoningEffort: reasoningEffort,
-		SystemPrompt:    systemPrompt,
-		MaxTurns:        maxTurns,
-		WritableRoots:   writableRoots,
+		Model:                    req.GetString("model", ""),
+		Cwd:                      cwd,
+		Sandbox:                  sandbox,
+		Approval:                 approval,
+		ReasoningEffort:          reasoningEffort,
+		RequestedReasoningEffort: requestedEffort,
+		SystemPrompt:             systemPrompt,
+		MaxTurns:                 maxTurns,
+		WritableRoots:            writableRoots,
 	})
+	created := time.Now()
+	recorder := rollout.Open(sess.ID, created)
+	sess.AttachRollout(recorder)
+	meta := map[string]any{
+		"session_id":        sess.ID,
+		"id":                sess.ID,
+		"timestamp":         created.UTC().Format(time.RFC3339Nano),
+		"cwd":               cwd,
+		"originator":        "ds-mcp",
+		"cli_version":       s.version,
+		"source":            "mcp",
+		"model_provider":    "deepseek",
+		"base_instructions": map[string]any{"text": systemPrompt},
+	}
+	if resolvedCwd, err := filepath.EvalSymlinks(cwd); err == nil {
+		if root, ok := repo.Root(resolvedCwd); ok {
+			branch, commit := repo.Head(root)
+			meta["git"] = map[string]any{"branch": branch, "commit_hash": commit}
+		}
+	}
+	recorder.Write("session_meta", meta)
+
 	text, err := s.runner.Run(ctx, sess, prompt)
 	return resultWithThreadID(sess.ID, text, err), nil
 }

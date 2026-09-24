@@ -91,6 +91,8 @@ func (a *Adapter) Turn(ctx context.Context, req provider.TurnRequest, onDelta fu
 		case "response.completed", "response.incomplete", "response.failed":
 			response := event.Response
 			final = &response
+		case "error":
+			return nil, fmt.Errorf("responses: %s: %s", event.Code, event.Message)
 		}
 	}
 	if err := stream.Err(); err != nil {

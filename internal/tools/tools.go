@@ -141,6 +141,9 @@ func SetProtectedFiles(paths []string) {
 	defer scrubMu.Unlock()
 	protected = protected[:0]
 	for _, path := range paths {
+		if absolute, err := filepath.Abs(path); err == nil {
+			path = absolute
+		}
 		protected = append(protected, resolveForComparison(path))
 	}
 }

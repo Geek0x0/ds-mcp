@@ -78,7 +78,11 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("config file %s: %w", path, err)
 	}
-	cfg.Path = path
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config file path %s: %w", path, err)
+	}
+	cfg.Path = absolute
 	for name, provider := range cfg.Providers {
 		if provider.BaseURL == "" {
 			switch provider.API {

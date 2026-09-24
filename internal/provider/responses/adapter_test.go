@@ -130,6 +130,18 @@ func TestResponsesIncompleteAndFailed(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamError(t *testing.T) {
+	fake := testutil.NewFakeResponses(t, []testutil.FakeResponse{{
+		Items:       []testutil.FakeResponseItem{{MessageText: "partial"}},
+		StreamError: &testutil.FakeResponseStreamError{Code: "invalid_request_error", Message: "scripted stream failure"},
+	}})
+	p := newAdapter(t, fake)
+	_, err := p.Turn(context.Background(), provider.TurnRequest{Model: "gpt-x", Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid_request_error") || !strings.Contains(err.Error(), "scripted stream failure") {
+		t.Fatalf("err = %v, want both error code and message", err)
+	}
+}
+
 func TestResponsesHTTPError(t *testing.T) {
 	fake := testutil.NewFakeResponses(t, []testutil.FakeResponse{{Status: 400}})
 	p := newAdapter(t, fake)

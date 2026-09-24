@@ -65,6 +65,31 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+func TestLoadRelativePathStoredAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(validTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	cfg, err := Load("config.toml")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !filepath.IsAbs(cfg.Path) {
+		t.Fatalf("cfg.Path = %q, want an absolute path", cfg.Path)
+	}
+	// The process cwd may differ from the temp dir after symlink resolution
+	// (for example /var vs /private/var on macOS), so compare against the
+	// resolved temp dir.
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(resolvedDir, "config.toml"); cfg.Path != want {
+		t.Fatalf("cfg.Path = %q, want %q", cfg.Path, want)
+	}
+}
+
 func TestAPIKey(t *testing.T) {
 	cfg, err := Load(writeConfig(t, validTOML))
 	if err != nil {

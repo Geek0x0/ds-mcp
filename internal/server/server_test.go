@@ -426,6 +426,24 @@ func TestModelDefaultAndRejection(t *testing.T) {
 	}
 }
 
+func TestHandleStartRejectsNonStringModel(t *testing.T) {
+	client := &stubProvider{}
+	s := New(client, testProviderConfig(), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "x", "cwd": t.TempDir(), "model": 5}))
+	if err != nil {
+		t.Fatalf("handleStart() Go error = %v, want nil", err)
+	}
+	if !result.IsError {
+		t.Fatalf("result = %#v, want tool error", result)
+	}
+	if text := toolResultText(t, result); !strings.Contains(text, `argument "model" must be a string`) {
+		t.Fatalf("error = %q, want non-string model error", text)
+	}
+	if requests := client.recordedRequests(); len(requests) != 0 {
+		t.Fatalf("provider requests = %d, want none", len(requests))
+	}
+}
+
 func TestEffortPassThroughAndMap(t *testing.T) {
 	for _, tc := range []struct{ requested, sent string }{
 		{"xhigh", "max"}, {"medium", "medium"}, {"none", "none"}, {"", "high"},

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Geek0x0/subagent-mcp/internal/patch"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
@@ -205,7 +206,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall provider
 		Justification  string `json:"justification"`
 	}
 	if err := json.Unmarshal([]byte(toolCall.Arguments), &args); err != nil {
-		return "invalid tool arguments: " + err.Error(), true
+		return "invalid tool arguments: " + err.Error() + "; received: " + truncateArguments(toolCall.Arguments, 200), true
 	}
 
 	switch toolCall.Name {
@@ -315,6 +316,19 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall provider
 	}
 
 	return "unknown tool: " + toolCall.Name, true
+}
+
+// truncateArguments returns raw limited to max bytes on a UTF-8 boundary,
+// appending an ellipsis when it had to cut.
+func truncateArguments(raw string, max int) string {
+	if len(raw) <= max {
+		return raw
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(raw[cut]) {
+		cut--
+	}
+	return raw[:cut] + "…"
 }
 
 // authorize evaluates every request; any Deny rejects the call, and all

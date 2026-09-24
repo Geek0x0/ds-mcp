@@ -39,6 +39,15 @@ type FakeResponse struct {
 	CachedTokens     int
 	OutputTokens     int
 	ReasoningTokens  int
+	// StreamError, when set, emits an in-stream `error` event with this code
+	// and message instead of a terminal response event.
+	StreamError *FakeResponseStreamError
+}
+
+// FakeResponseStreamError is the payload of an in-stream `error` event.
+type FakeResponseStreamError struct {
+	Code    string
+	Message string
 }
 
 // FakeResponses is an httptest server speaking the OpenAI Responses SSE
@@ -188,6 +197,15 @@ func (f *FakeResponses) handleResponses(w http.ResponseWriter, r *http.Request) 
 			sequence++
 		}
 		output = append(output, renderFakeResponseItem(item, i))
+	}
+
+	if scripted.StreamError != nil {
+		writeEvent("error", map[string]any{
+			"sequence_number": sequence,
+			"code":            scripted.StreamError.Code,
+			"message":         scripted.StreamError.Message,
+		})
+		return
 	}
 
 	status := scripted.ResponseStatus

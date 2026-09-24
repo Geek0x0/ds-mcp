@@ -70,6 +70,9 @@ func (a *Adapter) Turn(ctx context.Context, req provider.TurnRequest, onDelta fu
 		}
 		params.Messages = append(params.Messages, message.ToParam())
 	}
+	if turn[len(turn)-1].StopReason == anthropic.StopReasonPauseTurn {
+		return nil, fmt.Errorf("messages: turn still paused after %d continuations", maxPauseContinuations)
+	}
 	switch last := turn[len(turn)-1]; last.StopReason {
 	case anthropic.StopReasonRefusal:
 		return nil, fmt.Errorf("messages: model refused the request (category %q): %s", last.StopDetails.Category, last.StopDetails.Explanation)

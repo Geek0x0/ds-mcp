@@ -411,7 +411,14 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		)), nil
 	}
 
-	model := req.GetString("model", "")
+	var model string
+	if raw, present := arguments["model"]; present {
+		var ok bool
+		model, ok = raw.(string)
+		if !ok {
+			return mcp.NewToolResultError(`argument "model" must be a string`), nil
+		}
+	}
 	if model == "" {
 		model = s.cfg.DefaultModel
 	} else if !s.cfg.HasModel(model) {

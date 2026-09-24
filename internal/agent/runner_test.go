@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
 	"github.com/Geek0x0/subagent-mcp/internal/provider"
@@ -573,23 +574,55 @@ func TestRunnerShellNonZeroExitIsNotToolError(t *testing.T) {
 }
 
 func TestRunnerRejectsTruncatedToolArguments(t *testing.T) {
-	call := provider.ToolCall{ID: "c1", Name: "shell", Arguments: `{"command":"ls`}
-	client := &stubProvider{turns: []stubTurn{
-		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
-		{result: &provider.TurnResult{Text: "ok"}},
-	}}
-	emitter := &recEmitter{}
-	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
-	if _, err := runner.Run(context.Background(), session, "go"); err != nil {
-		t.Fatal(err)
+	// 500 bytes total; the 200-byte cut lands inside the 63rd euro sign, so
+	// truncation must back up to the previous UTF-8 boundary.
+	longArguments := `{"command":"` + strings.Repeat("€", 162) + "é"
+	tests := []struct {
+		name      string
+		arguments string
+		received  string
+	}{
+		{
+			name:      "short truncated arguments",
+			arguments: `{"command":"ls`,
+			received:  `received: {"command":"ls`,
+		},
+		{
+			name:      "500-byte arguments truncate on a UTF-8 boundary",
+			arguments: longArguments,
+			received:  `received: {"command":"` + strings.Repeat("€", 62) + "…",
+		},
 	}
-	tool := client.recordedRequests()[1].Messages[2]
-	if !tool.IsError || !strings.HasPrefix(tool.Text, "invalid tool arguments:") {
-		t.Fatalf("tool message = %#v", tool)
-	}
-	if containsEventType(t, emitter.recordedEvents(), "exec_command_begin") {
-		t.Fatal("truncated arguments must not execute the tool")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			call := provider.ToolCall{ID: "c1", Name: "shell", Arguments: test.arguments}
+			client := &stubProvider{turns: []stubTurn{
+				{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
+				{result: &provider.TurnResult{Text: "ok"}},
+			}}
+			emitter := &recEmitter{}
+			session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
+			runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+			if _, err := runner.Run(context.Background(), session, "go"); err != nil {
+				t.Fatal(err)
+			}
+			tool := client.recordedRequests()[1].Messages[2]
+			if !tool.IsError || !strings.HasPrefix(tool.Text, "invalid tool arguments:") {
+				t.Fatalf("tool message = %#v", tool)
+			}
+			if !utf8.ValidString(tool.Text) {
+				t.Fatalf("tool message is not valid UTF-8: %q", tool.Text)
+			}
+			if !strings.Contains(tool.Text, test.received) {
+				t.Fatalf("tool message = %q, want it to contain %q", tool.Text, test.received)
+			}
+			if len(test.arguments) > 200 && strings.Contains(tool.Text, test.arguments) {
+				t.Fatalf("tool message contains the untruncated arguments")
+			}
+			if containsEventType(t, emitter.recordedEvents(), "exec_command_begin") {
+				t.Fatal("truncated arguments must not execute the tool")
+			}
+		})
 	}
 }
 

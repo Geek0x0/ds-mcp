@@ -3,6 +3,7 @@ package messages
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -161,6 +162,25 @@ func TestMessagesPauseTurnContinues(t *testing.T) {
 	second := fake.Request(1)["messages"].([]any)
 	if len(second) != 2 || second[1].(map[string]any)["role"] != "assistant" {
 		t.Fatalf("pause_turn continuation messages = %#v", second)
+	}
+}
+
+func TestMessagesPauseTurnExhaustsContinuations(t *testing.T) {
+	scripted := make([]testutil.FakeMessage, 0, maxPauseContinuations+1)
+	for i := 0; i <= maxPauseContinuations; i++ {
+		scripted = append(scripted, testutil.FakeMessage{
+			StopReason: "pause_turn",
+			Blocks:     []testutil.FakeBlock{{Text: fmt.Sprintf("part %d ", i)}},
+		})
+	}
+	fake := testutil.NewFakeMessages(t, scripted)
+	p := newAdapter(t, fake, 1000)
+	_, err := p.Turn(context.Background(), provider.TurnRequest{Model: "claude-x", Messages: userOnly()}, nil)
+	if err == nil || !strings.Contains(err.Error(), "still paused") {
+		t.Fatalf("err = %v, want a still-paused error", err)
+	}
+	if got := fake.RequestCount(); got != maxPauseContinuations+1 {
+		t.Fatalf("requests = %d, want %d", got, maxPauseContinuations+1)
 	}
 }
 

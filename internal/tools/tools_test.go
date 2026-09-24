@@ -460,12 +460,28 @@ func TestReadFileRefusesProtectedFiles(t *testing.T) {
 			t.Fatalf("ReadFile(%s) error = %v", path, err)
 		}
 	}
+	if _, err := ReadFile(context.Background(), dir, "config.toml"); err == nil || !strings.Contains(err.Error(), "refusing to read") {
+		t.Fatalf("relative ReadFile(config.toml) error = %v, want refusal", err)
+	}
 	other := filepath.Join(dir, "other.txt")
 	if err := os.WriteFile(other, []byte("ok"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := ReadFile(context.Background(), dir, other); err != nil || got != "ok" {
 		t.Fatalf("unrelated file = %q, %v", got, err)
+	}
+}
+
+func TestReadFileRefusesRelativeProtectedPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Cleanup(func() { SetProtectedFiles(nil) })
+	SetProtectedFiles([]string{"config.toml"})
+	if _, err := ReadFile(context.Background(), dir, "config.toml"); err == nil || !strings.Contains(err.Error(), "refusing to read") {
+		t.Fatalf("ReadFile() error = %v, want refusal for a relative protected path", err)
 	}
 }
 

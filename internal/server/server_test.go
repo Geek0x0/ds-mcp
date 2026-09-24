@@ -244,7 +244,7 @@ func TestHandleDeepseekValidation(t *testing.T) {
 		{
 			name:     "invalid reasoning effort",
 			args:     map[string]any{"prompt": "hello", "reasoning-effort": "bogus"},
-			contains: []string{"bogus", "low", "high", "max"},
+			contains: []string{"reasoning-effort", "bogus", "low", "medium", "high", "xhigh", "max"},
 		},
 		{
 			name:     "relative cwd",
@@ -381,6 +381,75 @@ func TestHandleDeepseekDefaultsReasoningEffort(t *testing.T) {
 	}
 	if requests[0].ReasoningEffort != "high" {
 		t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, "high")
+	}
+}
+
+func TestHandleDeepseekReasoningEffortSources(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "config xhigh maps to max", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "xhigh"}}, want: "max"},
+		{name: "config medium maps to high", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "medium"}}, want: "high"},
+		{name: "config high", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "high"}}, want: "high"},
+		{name: "top-level xhigh maps to max", args: map[string]any{"reasoning-effort": "xhigh"}, want: "max"},
+		{name: "top-level wins over config", args: map[string]any{"reasoning-effort": "low", "config": map[string]any{"model_reasoning_effort": "max"}}, want: "low"},
+		{name: "empty top-level falls back to config", args: map[string]any{"reasoning-effort": "", "config": map[string]any{"model_reasoning_effort": "max"}}, want: "max"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+			s := New(client, "test")
+			args := map[string]any{"prompt": "hello", "cwd": t.TempDir()}
+			for key, value := range test.args {
+				args[key] = value
+			}
+
+			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", args))
+			if err != nil || result.IsError {
+				t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+			}
+			requests := client.recordedRequests()
+			if len(requests) != 1 {
+				t.Fatalf("request count = %d, want 1", len(requests))
+			}
+			if requests[0].ReasoningEffort != test.want {
+				t.Fatalf("reasoning effort = %q, want %q", requests[0].ReasoningEffort, test.want)
+			}
+		})
+	}
+}
+
+func TestHandleDeepseekRejectsInvalidConfigReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    any
+		contains []string
+	}{
+		{name: "unknown value", value: "ultra", contains: []string{"config.model_reasoning_effort", "ultra", "xhigh"}},
+		{name: "non-string", value: 3, contains: []string{"config.model_reasoning_effort", "string"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := New(&stubChatClient{}, "test")
+			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+				"prompt": "hello",
+				"cwd":    t.TempDir(),
+				"config": map[string]any{"model_reasoning_effort": test.value},
+			}))
+			if err != nil || !result.IsError {
+				t.Fatalf("handleDeepseek() = (%#v, %v), want tool error", result, err)
+			}
+			text := toolResultText(t, result)
+			for _, want := range test.contains {
+				if !strings.Contains(text, want) {
+					t.Errorf("result text = %q, want it to contain %q", text, want)
+				}
+			}
+		})
 	}
 }
 

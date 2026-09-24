@@ -18,6 +18,45 @@ import (
 
 const maxConfiguredTurns = 100000
 
+var reasoningEfforts = map[string]string{
+	"low":    "low",
+	"medium": "high",
+	"high":   "high",
+	"xhigh":  "max",
+	"max":    "max",
+}
+
+const reasoningEffortValues = "low, medium, high, xhigh, max"
+
+// resolveReasoningEffort returns the requested effort value and the value sent
+// to the API. The top-level argument wins over config.model_reasoning_effort.
+func resolveReasoningEffort(arguments map[string]any, config map[string]any) (string, string, error) {
+	requested := "high"
+	if raw, present := config["model_reasoning_effort"]; present {
+		value, ok := raw.(string)
+		if !ok {
+			return "", "", fmt.Errorf("config.model_reasoning_effort must be a string; valid values: %s", reasoningEffortValues)
+		}
+		if _, known := reasoningEfforts[value]; !known {
+			return "", "", fmt.Errorf("invalid config.model_reasoning_effort %q; valid values: %s", value, reasoningEffortValues)
+		}
+		requested = value
+	}
+	if raw, present := arguments["reasoning-effort"]; present {
+		value, ok := raw.(string)
+		if !ok {
+			return "", "", fmt.Errorf("reasoning-effort must be a string; valid values: %s", reasoningEffortValues)
+		}
+		if value != "" {
+			if _, known := reasoningEfforts[value]; !known {
+				return "", "", fmt.Errorf("invalid reasoning-effort %q; valid values: %s", value, reasoningEffortValues)
+			}
+			requested = value
+		}
+	}
+	return requested, reasoningEfforts[requested], nil
+}
+
 type Server struct {
 	mcp    *mcpserver.MCPServer
 	mgr    *agent.Manager
@@ -74,7 +113,7 @@ func deepseekTool() mcp.Tool {
 		),
 		mcp.WithString(
 			"reasoning-effort",
-			mcp.Description("Reasoning effort for DeepSeek's thinking mode: low, high, or max; defaults to high."),
+			mcp.Description("Reasoning effort for DeepSeek's thinking mode: low, medium, high, xhigh, or max (medium maps to high, xhigh maps to max); defaults to high, or to config.model_reasoning_effort when set."),
 		),
 		mcp.WithString(
 			"base-instructions",
@@ -86,7 +125,7 @@ func deepseekTool() mcp.Tool {
 		),
 		mcp.WithObject(
 			"config",
-			mcp.Description("loose config map; recognized key: max_turns (number from 1 to 100000); unknown keys and out-of-range values are silently ignored"),
+			mcp.Description("loose config map; recognized keys: max_turns (number from 1 to 100000), model_reasoning_effort (same values as reasoning-effort; the top-level argument wins), writable_roots (array of absolute directory paths the shell may also write under workspace-write); other unknown keys are silently ignored"),
 		),
 		mcp.WithOutputSchema[toolOutput](),
 	)
@@ -135,13 +174,11 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		)), nil
 	}
 
-	reasoningEffort := req.GetString("reasoning-effort", "high")
-	if reasoningEffort != "low" && reasoningEffort != "high" && reasoningEffort != "max" {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"invalid reasoning-effort %q; valid values: low, high, max",
-			reasoningEffort,
-		)), nil
-	}
+		config, _ := arguments["config"].(map[string]any)
+		_, reasoningEffort, err := resolveReasoningEffort(arguments, config)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 
 	var cwd string
 	if raw, present := arguments["cwd"]; present {
@@ -180,10 +217,8 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	maxTurns := 0
-	if config, ok := arguments["config"].(map[string]any); ok {
-		if value, ok := config["max_turns"].(float64); ok && value > 0 && value <= maxConfiguredTurns {
-			maxTurns = int(value)
-		}
+	if value, ok := config["max_turns"].(float64); ok && value > 0 && value <= maxConfiguredTurns {
+		maxTurns = int(value)
 	}
 
 	sess := s.mgr.Create(agent.Options{

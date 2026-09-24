@@ -212,6 +212,13 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	if baseInstructions := req.GetString("base-instructions", ""); baseInstructions != "" {
 		systemPrompt = baseInstructions
 	}
+	agentsMD, err := agent.LoadAgentsMD(cwd)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if agentsMD != "" {
+		systemPrompt += "\n\n" + agentsMD
+	}
 	if developerInstructions := req.GetString("developer-instructions", ""); developerInstructions != "" {
 		systemPrompt += "\n\n" + developerInstructions
 	}

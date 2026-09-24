@@ -283,6 +283,47 @@ func TestHandleDeepseekValidation(t *testing.T) {
 	}
 }
 
+func TestHandleDeepseekIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("REPO-RULE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+	s := New(client, "test")
+
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt":                 "hello",
+		"cwd":                    cwd,
+		"base-instructions":      "BASE-INSTRUCTIONS",
+		"developer-instructions": "DEV-INSTRUCTIONS",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+	}
+	system := client.recordedRequests()[0].Messages[0].Content
+	base := strings.Index(system, "BASE-INSTRUCTIONS")
+	rule := strings.Index(system, "REPO-RULE")
+	dev := strings.Index(system, "DEV-INSTRUCTIONS")
+	if base != 0 || rule < base || dev < rule {
+		t.Fatalf("system prompt order wrong: %q", system)
+	}
+}
+
+func TestHandleDeepseekAgentsMDReadErrorFails(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, "AGENTS.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := New(&stubChatClient{}, "test")
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "hello",
+		"cwd":    cwd,
+	}))
+	if err != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "AGENTS.md") {
+		t.Fatalf("handleDeepseek() = (%#v, %v), want AGENTS.md tool error", result, err)
+	}
+}
+
 func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 	client := &stubChatClient{turns: []stubTurn{
 		{result: &deepseek.TurnResult{Content: "hi"}},

@@ -57,6 +57,30 @@ func resolveReasoningEffort(arguments map[string]any, config map[string]any) (st
 	return requested, reasoningEfforts[requested], nil
 }
 
+func parseWritableRoots(config map[string]any) ([]string, error) {
+	raw, present := config["writable_roots"]
+	if !present {
+		return nil, nil
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return nil, errors.New("config.writable_roots must be an array of absolute directory paths")
+	}
+	roots := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		path, ok := entry.(string)
+		if !ok || !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("config.writable_roots entry %v must be an absolute path", entry)
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("config.writable_roots entry %q must be an existing directory", path)
+		}
+		roots = append(roots, filepath.Clean(path))
+	}
+	return roots, nil
+}
+
 type Server struct {
 	mcp    *mcpserver.MCPServer
 	mgr    *agent.Manager
@@ -228,6 +252,11 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		maxTurns = int(value)
 	}
 
+	writableRoots, err := parseWritableRoots(config)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	sess := s.mgr.Create(agent.Options{
 		Model:           req.GetString("model", ""),
 		Cwd:             cwd,
@@ -236,6 +265,7 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		ReasoningEffort: reasoningEffort,
 		SystemPrompt:    systemPrompt,
 		MaxTurns:        maxTurns,
+		WritableRoots:   writableRoots,
 	})
 	text, err := s.runner.Run(ctx, sess, prompt)
 	return resultWithThreadID(sess.ID, text, err), nil

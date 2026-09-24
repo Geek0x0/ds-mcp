@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Geek0x0/ds-mcp/internal/deepseek"
 	"github.com/Geek0x0/ds-mcp/internal/policy"
+	"github.com/Geek0x0/ds-mcp/internal/sandbox"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -792,4 +794,81 @@ func assertCompleteToolHistory(t *testing.T, messages []openai.ChatCompletionMes
 			}
 		}
 	}
+}
+
+func runShellOnce(t *testing.T, options Options, approver *stubApprover, command string) string {
+	t.Helper()
+	call := toolCall("call-shell", "shell", `{"command":`+strconv.Quote(command)+`}`)
+	client := &stubClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &deepseek.TurnResult{Content: "done"}},
+	}}
+	session := newTestSession(t, options)
+	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: approver}
+	if _, err := runner.Run(context.Background(), session, "run it"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	return findToolMessage(t, client.recordedRequests()[1].Messages, call.ID).Content
+}
+
+func TestRunnerShellSandboxing(t *testing.T) {
+	if err := sandbox.Available(); err != nil {
+		t.Skipf("landlock unavailable: %v", err)
+	}
+	outside := t.TempDir()
+	extra := t.TempDir()
+
+	t.Run("workspace-write denies writes outside roots", func(t *testing.T) {
+		// t.TempDir() lives under /tmp, which is itself a workspace-write root, so
+		// the target has to sit outside every root.
+		target := filepath.Join("/var/tmp", "ds-mcp-sandbox-outside-"+strconv.Itoa(os.Getpid()))
+		t.Cleanup(func() { _ = os.Remove(target) })
+		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never"}, &stubApprover{}, "touch "+target)
+		if strings.HasPrefix(result, "exit code: 0") {
+			t.Fatalf("result = %q, want failure", result)
+		}
+		if _, err := os.Stat(target); err == nil {
+			t.Fatalf("outside file created")
+		}
+	})
+
+	t.Run("workspace-write allows cwd and /tmp", func(t *testing.T) {
+		tmpFile := filepath.Join("/tmp", "ds-mcp-sandbox-"+strconv.Itoa(os.Getpid()))
+		t.Cleanup(func() { _ = os.Remove(tmpFile) })
+		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never"}, &stubApprover{}, "touch in-cwd && touch "+tmpFile)
+		if !strings.HasPrefix(result, "exit code: 0") {
+			t.Fatalf("result = %q, want success", result)
+		}
+	})
+
+	t.Run("workspace-write allows configured writable root", func(t *testing.T) {
+		target := filepath.Join(extra, "extra")
+		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never", WritableRoots: []string{extra}}, &stubApprover{}, "touch "+target)
+		if !strings.HasPrefix(result, "exit code: 0") {
+			t.Fatalf("result = %q, want success", result)
+		}
+	})
+
+	t.Run("danger-full-access is unwrapped", func(t *testing.T) {
+		target := filepath.Join(outside, "danger")
+		result := runShellOnce(t, Options{Sandbox: "danger-full-access", Approval: "never"}, &stubApprover{}, "touch "+target)
+		if !strings.HasPrefix(result, "exit code: 0") {
+			t.Fatalf("result = %q, want success", result)
+		}
+	})
+
+	t.Run("human-approved command is unwrapped", func(t *testing.T) {
+		target := filepath.Join(outside, "approved")
+		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "untrusted"}, &stubApprover{approved: true}, "touch "+target)
+		if !strings.HasPrefix(result, "exit code: 0") {
+			t.Fatalf("result = %q, want success", result)
+		}
+	})
+
+	t.Run("read-only allowlisted command still runs", func(t *testing.T) {
+		result := runShellOnce(t, Options{Sandbox: "read-only", Approval: "never"}, &stubApprover{}, "echo hi")
+		if !strings.HasPrefix(result, "exit code: 0") || !strings.Contains(result, "hi") {
+			t.Fatalf("result = %q, want success", result)
+		}
+	})
 }

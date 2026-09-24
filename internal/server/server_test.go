@@ -747,6 +747,49 @@ func TestEmitWithoutClientReturnsPromptly(t *testing.T) {
 	}
 }
 
+func TestHandleDeepseekValidatesWritableRoots(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "not an array", value: "/tmp"},
+		{name: "non-string entry", value: []any{1}},
+		{name: "relative path", value: []any{"rel/dir"}},
+		{name: "missing path", value: []any{filepath.Join(t.TempDir(), "missing")}},
+		{name: "file not dir", value: []any{file}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := New(&stubChatClient{}, "test")
+			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+				"prompt": "hello",
+				"cwd":    t.TempDir(),
+				"config": map[string]any{"writable_roots": test.value},
+			}))
+			if err != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "config.writable_roots") {
+				t.Fatalf("handleDeepseek() = (%#v, %v), want config.writable_roots tool error", result, err)
+			}
+		})
+	}
+}
+
+func TestHandleDeepseekAcceptsWritableRoots(t *testing.T) {
+	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+	s := New(client, "test")
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "hello",
+		"cwd":    t.TempDir(),
+		"config": map[string]any{"writable_roots": []any{t.TempDir()}},
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+	}
+}
+
 func callToolRequest(name string, arguments map[string]any) mcp.CallToolRequest {
 	return mcp.CallToolRequest{
 		Request: mcp.Request{},

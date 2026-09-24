@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"os"
 	"sync"
 
 	"github.com/Geek0x0/ds-mcp/internal/policy"
@@ -27,6 +28,7 @@ type Options struct {
 	Approval        policy.ApprovalPolicy
 	SystemPrompt    string
 	MaxTurns        int
+	WritableRoots   []string
 }
 
 type Session struct {
@@ -38,6 +40,7 @@ type Session struct {
 	sandbox         policy.Sandbox
 	approval        policy.ApprovalPolicy
 	maxTurns        int
+	writableRoots   []string
 	messages        []openai.ChatCompletionMessage
 	mu              sync.Mutex
 }
@@ -73,6 +76,7 @@ func (m *Manager) Create(o Options) *Session {
 		sandbox:         o.Sandbox,
 		approval:        o.Approval,
 		maxTurns:        o.MaxTurns,
+		writableRoots:   append([]string(nil), o.WritableRoots...),
 		messages: []openai.ChatCompletionMessage{{
 			Role:    openai.ChatMessageRoleSystem,
 			Content: o.SystemPrompt,
@@ -92,4 +96,23 @@ func (m *Manager) Get(id string) (*Session, bool) {
 
 	session, ok := m.sessions[id]
 	return session, ok
+}
+
+// shellWritableRoots returns the Landlock writable roots for shell calls the
+// policy auto-allows, and false when such calls run without the kernel sandbox.
+func (s *Session) shellWritableRoots() ([]string, bool) {
+	switch s.sandbox {
+	case policy.Sandbox("read-only"):
+		return []string{"/dev"}, true
+	case policy.Sandbox("workspace-write"):
+		roots := []string{s.cwd, "/tmp", "/dev"}
+		if tmp := os.Getenv("TMPDIR"); tmp != "" && tmp != "/tmp" {
+			if info, err := os.Stat(tmp); err == nil && info.IsDir() {
+				roots = append(roots, tmp)
+			}
+		}
+		return append(roots, s.writableRoots...), true
+	default:
+		return nil, false
+	}
 }

@@ -215,6 +215,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		Path:    args.Path,
 		Cwd:     s.cwd,
 	})
+	approved := false
 	switch decision {
 	case policy.Deny:
 		return "operation denied by sandbox policy: " + reason
@@ -231,6 +232,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		}) {
 			return "operation denied: approval was not granted"
 		}
+		approved = true
 	}
 
 	beginEvent := map[string]any{
@@ -257,12 +259,16 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 
 	switch toolCall.Function.Name {
 	case "shell":
-		out, code, err := tools.RunShell(
-			ctx,
-			s.cwd,
-			args.Command,
-			time.Duration(args.TimeoutSeconds)*time.Second,
-		)
+		timeout := time.Duration(args.TimeoutSeconds) * time.Second
+		var out string
+		var code int
+		var err error
+		if roots, sandboxed := s.shellWritableRoots(); sandboxed && !approved {
+			out, code, err = tools.RunShellSandboxed(ctx, s.cwd, args.Command, timeout, roots)
+		} else {
+			// ponytail: A human-approved command runs without the kernel sandbox, matching Codex escalation.
+			out, code, err = tools.RunShell(ctx, s.cwd, args.Command, timeout)
+		}
 		*exitCode = code
 		toolErr = err
 

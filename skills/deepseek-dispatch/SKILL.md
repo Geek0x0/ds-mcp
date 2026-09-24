@@ -23,13 +23,17 @@ Use the most recent returned ID with `deepseek-reply`; the ID remains the same f
 
 Choose the narrowest sandbox that permits the task:
 
-- `read-only` (default) permits `read_file` and the policy's shell-command allowlist. Other operations fall outside the sandbox.
-- `workspace-write` permits `read_file`, all `shell` calls, and `write_file` when its resolved path stays inside `cwd`. A `write_file` path containing `..` or escaping through a symlink is outside the sandbox.
-- `danger-full-access` treats every built-in tool operation as inside the sandbox.
+- `read-only` (default) permits `read_file` and the policy's shell-command allowlist. Other operations fall outside the sandbox. Auto-allowed shell commands run with `/dev` as their only writable root.
+- `workspace-write` permits `read_file`, all `shell` calls, and `write_file` when its resolved path stays inside `cwd`. A `write_file` path containing `..` or escaping through a symlink is outside the sandbox. Auto-allowed shell commands are wrapped in a Landlock ruleset whose writable roots are `cwd`, `/tmp`, `$TMPDIR`, `/dev`, and any `config.writable_roots` entries; writes anywhere else fail with `Permission denied` instead of being heuristically detected.
+- `danger-full-access` treats every built-in tool operation as inside the sandbox and runs shell commands without the kernel wrapper.
 
 The shell-command allowlist contains `ls`, `cat`, `head`, `tail`, `rg`, `grep`, `find`, `pwd`, `wc`, `stat`, `which`, and `echo`, plus `git status`, `git diff`, `git log`, `git show`, `git branch`, `git blame`, `git rev-parse`, and `git ls-files`.
 
-**Safety: these sandbox modes are application-layer policy intended to prevent accidental misuse. They are not malicious-actor-proof and do not provide OS-level isolation. Reads performed through `read_file` or allowlisted shell commands are not confined to `cwd` at any sandbox level; they can access any path the server process can read. This layer also cannot always detect writes performed internally by an allowed shell command that escape the declared sandbox boundary; in particular, `workspace-write` considers shell calls inside its boundary. Use operating-system isolation when the trust boundary requires it.**
+`apply_patch` is treated as one `write_file` request per touched path, and a denial on any path denies the whole patch; all approval-requiring paths are combined into a single approval request.
+
+The kernel sandbox fails closed: on a kernel without Landlock (Linux below 5.13) or on a non-Linux platform, an auto-allowed shell call exits with code 126 and a `ds-mcp: landlock unavailable: ...` message rather than running unsandboxed. Shell calls a human approves run without the wrapper, and `danger-full-access` never applies it.
+
+**Safety: the policy prevents accidental misuse, and the Landlock wrapper confines auto-allowed shell writes to the roots above. Reads and network access remain unrestricted, `write_file` and `apply_patch` writes are limited to `cwd` in-process rather than by the kernel, and Landlock ABI v1 (Linux 5.13–5.18) does not restrict cross-directory rename or truncate outside the writable roots. Use stronger operating-system isolation when the trust boundary requires it.**
 
 The `approval-policy` determines what happens to operations inside or outside the selected sandbox:
 
@@ -42,11 +46,11 @@ Approval requests are sent to the MCP client. If approval elicitation is unavail
 
 `cwd` must be an absolute path to an existing directory; a Git worktree root is usually a sensible choice. If omitted, it defaults to the ds-mcp process working directory. `model` defaults to `deepseek-v4-pro`.
 
-Use `reasoning-effort` to control reasoning depth on the default model. It accepts `low`, `high`, or `max` and defaults to `high`: choose `low` for simple, fast tasks, keep `high` for typical work, and use `max` for the hardest multi-step or planning-heavy tasks.
+Use `reasoning-effort` to control reasoning depth on the default model. It accepts `low`, `medium`, `high`, `xhigh`, or `max` and defaults to `high`; `medium` is sent to the API as `high` and `xhigh` as `max`, so choose `low` for simple, fast tasks, `high` for typical work, and `xhigh` or `max` for the hardest multi-step or planning-heavy tasks. The top-level argument wins over `config.model_reasoning_effort`, and an invalid value from either source is an error.
 
-The optional loose `config` object recognizes `max_turns`. A number from 1 through 100000 overrides the default limit of 50 agent turns. Unknown keys, values of the wrong type, and out-of-range values are silently ignored.
+The optional loose `config` object recognizes three keys. `max_turns` accepts a number from 1 through 100000 and overrides the default limit of 50 agent turns; unknown keys, values of the wrong type, and out-of-range values are silently ignored. `model_reasoning_effort` accepts the same values as `reasoning-effort` and is overridden by the top-level argument. `writable_roots` is an array of absolute paths to existing directories that the shell may also write under `workspace-write`. Invalid `model_reasoning_effort` or `writable_roots` values fail the call.
 
-Use `base-instructions` only to replace the built-in base system instructions completely. Use `developer-instructions` to append additional system instructions after the selected base instructions.
+The repository's `AGENTS.md` files are loaded automatically: the server collects them from the repository root down to `cwd` (32 KiB total cap) and appends them to the system prompt between the base instructions and any `developer-instructions`. Include those conventions in the dispatch prompt only when you want to override or extend them, and use `base-instructions` only to replace the built-in base instructions completely.
 
 ## Event stream
 
@@ -55,13 +59,17 @@ While a call runs, the server sends `deepseek/event` notifications containing th
 - `task_started`: the call was accepted and processing began.
 - `agent_message_delta`: streamed assistant text; `delta` contains the new text fragment.
 - `token_count`: token usage reported for a model turn, with `prompt_tokens`, `completion_tokens`, and `total_tokens`.
-- `exec_command_begin`: tool execution is starting; includes `call_id`, `tool`, and either `command` for `shell` or `path` for file tools.
-- `exec_command_end`: tool execution finished; includes `call_id` and `tool`, plus `exit_code` for `shell` and `error` when execution failed.
+- `exec_command_begin`: tool execution is starting; includes `call_id`, `tool`, and either `command` for `shell`, `paths` (an array) for `apply_patch`, or `path` for the other file tools.
+- `exec_command_end`: tool execution finished; includes `call_id` and `tool`, plus `exit_code` for `shell`, `paths` for `apply_patch`, and `error` when execution failed.
 - `agent_message`: the final assistant response, in `message`.
 - `task_complete`: the thread call completed successfully.
 - `error`: the call failed, with the failure text in `message`.
 
 Policy denials and rejected approval requests are returned to the model as tool results; a tool that never begins execution does not emit the begin/end pair.
+
+## Rollout files
+
+Each session also writes a Codex-compatible rollout to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<threadId>.jsonl` (default `~/.codex`, UTC, mode `0600`). It records the prompt, the composed system prompt, tool arguments, tool results, and command output, so avoid dispatching secrets and treat the directory like a session transcript. Set `DS_MCP_ROLLOUT=off` in the server environment to disable it.
 
 ## Recommended prompt structure
 

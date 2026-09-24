@@ -1,6 +1,6 @@
 {
   "name": "deepseek",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DeepSeek-powered coding agent exposed as MCP tools (deepseek / deepseek-reply)",
   "author": {
     "name": "Kaidi Shi"

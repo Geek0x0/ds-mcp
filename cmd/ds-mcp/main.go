@@ -14,7 +14,7 @@ import (
 	dsserver "github.com/Geek0x0/ds-mcp/internal/server"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	sandbox.MaybeRunHelper()

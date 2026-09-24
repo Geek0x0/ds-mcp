@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Geek0x0/ds-mcp/internal/sandbox"
 )
 
 func TestRunShell(t *testing.T) {
@@ -323,5 +325,37 @@ func TestWriteFile(t *testing.T) {
 	}
 	if string(got) != "second" {
 		t.Errorf("overwritten file content = %q, want %q", got, "second")
+	}
+}
+
+func TestRunShellSandboxed(t *testing.T) {
+	if err := sandbox.Available(); err != nil {
+		t.Skipf("landlock unavailable: %v", err)
+	}
+	cwd := t.TempDir()
+	outside := t.TempDir()
+
+	out, code, err := RunShellSandboxed(context.Background(), cwd, "touch inside && echo ok", 10*time.Second, []string{cwd, "/dev"})
+	if err != nil || code != 0 || !strings.Contains(out, "ok") {
+		t.Fatalf("inside = (%q, %d, %v)", out, code, err)
+	}
+
+	out, code, err = RunShellSandboxed(context.Background(), cwd, "touch "+filepath.Join(outside, "bad"), 10*time.Second, []string{cwd, "/dev"})
+	if err != nil || code == 0 {
+		t.Fatalf("outside = (%q, %d, %v), want non-zero exit", out, code, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "bad")); statErr == nil {
+		t.Fatalf("outside file was created")
+	}
+}
+
+func TestRunShellSandboxedTimeoutKillsCommand(t *testing.T) {
+	if err := sandbox.Available(); err != nil {
+		t.Skipf("landlock unavailable: %v", err)
+	}
+	start := time.Now()
+	_, code, err := RunShellSandboxed(context.Background(), t.TempDir(), "sleep 5", 200*time.Millisecond, []string{"/dev"})
+	if elapsed := time.Since(start); err == nil || code != -1 || elapsed > 2*time.Second {
+		t.Fatalf("RunShellSandboxed() = (%d, %v) after %v, want timeout", code, err, elapsed)
 	}
 }

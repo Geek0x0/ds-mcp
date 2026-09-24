@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/Geek0x0/ds-mcp/internal/sandbox"
 )
 
 const MaxOutputBytes = 16 * 1024
@@ -46,6 +48,25 @@ func (b *limitedBuffer) String() string {
 }
 
 func RunShell(ctx context.Context, cwd, command string, timeout time.Duration) (out string, exitCode int, err error) {
+	return runCommand(ctx, cwd, []string{"bash", "-lc", command}, timeout)
+}
+
+// RunShellSandboxed runs command through the Landlock helper so that only
+// writableRoots are writable by the command and its descendants.
+func RunShellSandboxed(
+	ctx context.Context,
+	cwd, command string,
+	timeout time.Duration,
+	writableRoots []string,
+) (out string, exitCode int, err error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", -1, fmt.Errorf("locate sandbox helper: %w", err)
+	}
+	return runCommand(ctx, cwd, sandbox.Command(self, writableRoots, "bash", "-lc", command), timeout)
+}
+
+func runCommand(ctx context.Context, cwd string, argv []string, timeout time.Duration) (out string, exitCode int, err error) {
 	if timeout <= 0 {
 		timeout = DefaultShellTimeout
 	} else if timeout > MaxShellTimeout {
@@ -56,7 +77,7 @@ func RunShell(ctx context.Context, cwd, command string, timeout time.Duration) (
 	defer cancel()
 
 	var buf limitedBuffer
-	cmd := exec.CommandContext(runCtx, "bash", "-lc", command)
+	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = cwd
 	// ponytail: Linux process-group signaling kills ordinary descendants, and WaitDelay bounds
 	// inherited-pipe waits. A descendant that escapes the group can survive without being reported.

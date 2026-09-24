@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 
 	"github.com/Geek0x0/ds-mcp/internal/deepseek"
+	"github.com/Geek0x0/ds-mcp/internal/sandbox"
 	dsserver "github.com/Geek0x0/ds-mcp/internal/server"
 )
 
 const version = "0.3.0"
 
 func main() {
+	sandbox.MaybeRunHelper()
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {

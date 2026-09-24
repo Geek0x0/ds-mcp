@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/google/uuid v1.6.0
+	github.com/landlock-lsm/go-landlock v0.10.1
 	github.com/mark3labs/mcp-go v0.44.0
 	github.com/sashabaranov/go-openai v1.42.0
 )
@@ -16,5 +17,7 @@ require (
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 )

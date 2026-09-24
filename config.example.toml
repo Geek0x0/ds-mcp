@@ -1,0 +1,33 @@
+# subagent-mcp configuration.
+# Copy to ~/.config/subagent-mcp/config.toml (or point SUBAGENT_MCP_CONFIG at it).
+# API keys are never stored here: env_key names the environment variable that holds each key.
+# Switch providers by changing active_provider and reconnecting the MCP server.
+
+active_provider = "deepseek"
+
+# chat-completions: OpenAI Chat Completions streaming (DeepSeek and other compatible endpoints).
+[providers.deepseek]
+api = "chat-completions"
+base_url = "https://api.deepseek.com"
+env_key = "DEEPSEEK_API_KEY"
+default_model = "deepseek-flash"
+models = [
+  { id = "deepseek-flash",  description = "fast, cheap" },
+  { id = "deepseek-v4-pro", description = "strongest" },
+]
+effort_map = { medium = "high", xhigh = "max" }
+
+# responses: OpenAI Responses API streaming.
+[providers.openai]
+api = "responses"
+env_key = "OPENAI_API_KEY"
+default_model = "gpt-5.5"
+models = [{ id = "gpt-5.5" }]
+
+# messages: Anthropic Messages API streaming.
+[providers.anthropic]
+api = "messages"
+env_key = "ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-5"
+max_output_tokens = 64000
+models = [{ id = "claude-sonnet-5" }, { id = "claude-opus-5" }]

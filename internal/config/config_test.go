@@ -139,3 +139,15 @@ func TestValidEffort(t *testing.T) {
 		t.Errorf("ValidEffort(turbo) = true")
 	}
 }
+
+func TestExampleConfigLoads(t *testing.T) {
+	cfg, err := Load("../../config.example.toml")
+	if err != nil {
+		t.Fatalf("config.example.toml does not load: %v", err)
+	}
+	for _, name := range []string{"deepseek", "openai", "anthropic"} {
+		if _, ok := cfg.Providers[name]; !ok {
+			t.Errorf("example lacks provider %q", name)
+		}
+	}
+}

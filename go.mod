@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/landlock-lsm/go-landlock v0.10.1
 	github.com/mark3labs/mcp-go v0.44.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/sashabaranov/go-openai v1.42.0
 )
 

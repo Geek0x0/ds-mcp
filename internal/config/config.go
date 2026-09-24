@@ -1,0 +1,223 @@
+// Package config loads the subagent-mcp TOML configuration.
+package config
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"github.com/pelletier/go-toml/v2"
+)
+
+// API protocol identifiers accepted by the api field of a provider.
+const (
+	APIChatCompletions = "chat-completions"
+	APIResponses       = "responses"
+	APIMessages        = "messages"
+)
+
+// EffortValues lists the reasoning effort values accepted from callers.
+var EffortValues = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// Model describes one model advertised by a provider.
+type Model struct {
+	ID          string `toml:"id"`
+	Description string `toml:"description"`
+}
+
+// Provider holds the configuration of a single API provider.
+type Provider struct {
+	API             string            `toml:"api"`
+	BaseURL         string            `toml:"base_url"`
+	EnvKey          string            `toml:"env_key"`
+	DefaultModel    string            `toml:"default_model"`
+	Models          []Model           `toml:"models"`
+	EffortMap       map[string]string `toml:"effort_map"`
+	MaxOutputTokens int               `toml:"max_output_tokens"`
+}
+
+// Config is the root of the configuration file.
+type Config struct {
+	Path           string              `toml:"-"`
+	ActiveProvider string              `toml:"active_provider"`
+	Providers      map[string]Provider `toml:"providers"`
+}
+
+// DefaultPath returns $SUBAGENT_MCP_CONFIG or ~/.config/subagent-mcp/config.toml.
+func DefaultPath() (string, error) {
+	if path := os.Getenv("SUBAGENT_MCP_CONFIG"); path != "" {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory for the default config path: %w", err)
+	}
+	return filepath.Join(home, ".config", "subagent-mcp", "config.toml"), nil
+}
+
+// Load reads, strictly decodes, defaults and validates the config at path.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("config file %s not found; copy config.example.toml from the subagent-mcp repository to that path or set SUBAGENT_MCP_CONFIG", path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
+	}
+	var cfg Config
+	decoder := toml.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		var strict *toml.StrictMissingError
+		if errors.As(err, &strict) {
+			return nil, fmt.Errorf("config file %s: unknown keys: %s", path, strict.String())
+		}
+		return nil, fmt.Errorf("config file %s: %w", path, err)
+	}
+	cfg.Path = path
+	for name, provider := range cfg.Providers {
+		if provider.BaseURL == "" {
+			switch provider.API {
+			case APIMessages:
+				provider.BaseURL = "https://api.anthropic.com"
+			case APIChatCompletions, APIResponses:
+				provider.BaseURL = "https://api.openai.com/v1"
+			}
+		}
+		if provider.MaxOutputTokens == 0 {
+			provider.MaxOutputTokens = 64000
+		}
+		cfg.Providers[name] = provider
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config file %s: %w", path, err)
+	}
+	return &cfg, nil
+}
+
+// Validate checks the active provider and every provider's fields.
+func (c *Config) Validate() error {
+	if c.ActiveProvider == "" {
+		return errors.New("active_provider is required")
+	}
+	if _, ok := c.Providers[c.ActiveProvider]; !ok {
+		return fmt.Errorf("active_provider %q is not defined under [providers]", c.ActiveProvider)
+	}
+	names := make([]string, 0, len(c.Providers))
+	for name := range c.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := c.Providers[name].validate("providers." + name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p Provider) validate(prefix string) error {
+	switch p.API {
+	case APIChatCompletions, APIResponses, APIMessages:
+	default:
+		return fmt.Errorf("%s.api must be one of %s, %s, %s; got %q", prefix, APIChatCompletions, APIResponses, APIMessages, p.API)
+	}
+	if p.EnvKey == "" {
+		return fmt.Errorf("%s.env_key is required", prefix)
+	}
+	if len(p.Models) == 0 {
+		return fmt.Errorf("%s.models must list at least one model", prefix)
+	}
+	seen := map[string]bool{}
+	for i, model := range p.Models {
+		if model.ID == "" {
+			return fmt.Errorf("%s.models[%d].id is required", prefix, i)
+		}
+		if seen[model.ID] {
+			return fmt.Errorf("%s.models has duplicate id %q", prefix, model.ID)
+		}
+		seen[model.ID] = true
+	}
+	if !seen[p.DefaultModel] {
+		return fmt.Errorf("%s.default_model %q must be one of %s.models", prefix, p.DefaultModel, prefix)
+	}
+	for from, to := range p.EffortMap {
+		if !ValidEffort(from) || !ValidEffort(to) {
+			return fmt.Errorf("%s.effort_map entry %q = %q: keys and values must be one of %v", prefix, from, to, EffortValues)
+		}
+	}
+	if p.MaxOutputTokens < 0 {
+		return fmt.Errorf("%s.max_output_tokens must be positive", prefix)
+	}
+	return nil
+}
+
+// Active returns the active provider's name and configuration.
+func (c *Config) Active() (string, Provider) {
+	return c.ActiveProvider, c.Providers[c.ActiveProvider]
+}
+
+// APIKey returns the active provider's API key from its env_key variable.
+func (c *Config) APIKey() (string, error) {
+	_, p := c.Active()
+	key := os.Getenv(p.EnvKey)
+	if key == "" {
+		return "", fmt.Errorf("environment variable %s (providers.%s.env_key) must be set to the API key", p.EnvKey, c.ActiveProvider)
+	}
+	return key, nil
+}
+
+// EnvKeys returns every provider's env_key, sorted and deduplicated.
+func (c *Config) EnvKeys() []string {
+	set := map[string]bool{}
+	for _, p := range c.Providers {
+		set[p.EnvKey] = true
+	}
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// HasModel reports whether id is one of the provider's models.
+func (p Provider) HasModel(id string) bool {
+	for _, model := range p.Models {
+		if model.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ModelIDs returns the provider's model ids in config order.
+func (p Provider) ModelIDs() []string {
+	ids := make([]string, len(p.Models))
+	for i, model := range p.Models {
+		ids[i] = model.ID
+	}
+	return ids
+}
+
+// MapEffort returns effort_map[value] if present, else value.
+func (p Provider) MapEffort(value string) string {
+	if mapped, ok := p.EffortMap[value]; ok {
+		return mapped
+	}
+	return value
+}
+
+// ValidEffort reports whether value is one of EffortValues.
+func ValidEffort(value string) bool {
+	for _, known := range EffortValues {
+		if value == known {
+			return true
+		}
+	}
+	return false
+}

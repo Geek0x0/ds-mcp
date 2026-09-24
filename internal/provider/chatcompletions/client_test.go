@@ -1,4 +1,4 @@
-package deepseek_test
+package chatcompletions_test
 
 import (
 	"context"
@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/testutil"
 
 	openai "github.com/sashabaranov/go-openai"
 )
 
 func TestChatTurnStreamsTextAndUsage(t *testing.T) {
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{Text: "hello world!"}})
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{{Text: "hello world!"}})
 	client := newTestClient(fake.URL)
 
 	var deltas []string
@@ -71,7 +71,7 @@ func TestChatTurnReconstructsToolCallsByIndex(t *testing.T) {
 			Args: `{"timezone":"America/Vancouver"}`,
 		},
 	}
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{ToolCalls: calls}})
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{{ToolCalls: calls}})
 	client := newTestClient(fake.URL)
 
 	result, err := client.ChatTurn(context.Background(), chatRequest(), func(string) {})
@@ -157,7 +157,7 @@ func TestChatTurnDefaultsMissingToolCallTypeToFunction(t *testing.T) {
 }
 
 func TestChatTurnRetriesRetryableStatusesThenSucceeds(t *testing.T) {
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{
 		{Status: 500},
 		{Status: 429},
 		{Text: "ok"},
@@ -177,7 +177,7 @@ func TestChatTurnRetriesRetryableStatusesThenSucceeds(t *testing.T) {
 }
 
 func TestChatTurnReturnsErrorAfterRetriesAreExhausted(t *testing.T) {
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{
 		{Status: 500},
 		{Status: 500},
 		{Status: 500},
@@ -195,7 +195,7 @@ func TestChatTurnReturnsErrorAfterRetriesAreExhausted(t *testing.T) {
 }
 
 func TestChatTurnDoesNotRetryNonRetryableStatus(t *testing.T) {
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{Status: 400}})
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{{Status: 400}})
 	client := newTestClient(fake.URL)
 
 	result, err := client.ChatTurn(context.Background(), chatRequest(), func(string) {})
@@ -208,8 +208,8 @@ func TestChatTurnDoesNotRetryNonRetryableStatus(t *testing.T) {
 }
 
 func TestChatTurnStopsBackoffWhenContextIsCanceled(t *testing.T) {
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{Status: 500}})
-	client := deepseek.New("test-key", fake.URL)
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{{Status: 500}})
+	client := chatcompletions.NewClient("test-key", fake.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client.Backoff = func(int) time.Duration {
@@ -218,7 +218,7 @@ func TestChatTurnStopsBackoffWhenContextIsCanceled(t *testing.T) {
 	}
 
 	type outcome struct {
-		result *deepseek.TurnResult
+		result *chatcompletions.TurnResult
 		err    error
 	}
 	resultCh := make(chan outcome, 1)
@@ -244,8 +244,8 @@ func TestChatTurnStopsBackoffWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
-func newTestClient(baseURL string) *deepseek.Client {
-	client := deepseek.New("test-key", baseURL)
+func newTestClient(baseURL string) *chatcompletions.Client {
+	client := chatcompletions.NewClient("test-key", baseURL)
 	client.Backoff = func(int) time.Duration { return 0 }
 
 	return client
@@ -293,7 +293,7 @@ func newToolCallStream(t *testing.T, call openai.ToolCall) *httptest.Server {
 }
 
 func TestChatTurnCapturesReasoningSeparately(t *testing.T) {
-	fake := testutil.NewFakeDeepSeek(t, []testutil.FakeTurn{{Reasoning: "think first", Text: "answer"}})
+	fake := testutil.NewFakeChat(t, []testutil.FakeTurn{{Reasoning: "think first", Text: "answer"}})
 	client := newTestClient(fake.URL)
 
 	result, err := client.ChatTurn(context.Background(), openai.ChatCompletionRequest{

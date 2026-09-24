@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/Geek0x0/subagent-mcp/internal/agent"
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/testutil"
 )
 
@@ -53,11 +53,11 @@ func newRig(
 	turns []testutil.FakeTurn,
 	o agent.Options,
 	approve bool,
-) (*agent.Runner, *agent.Session, *recEmitter, *testutil.FakeDeepSeek) {
+) (*agent.Runner, *agent.Session, *recEmitter, *testutil.FakeChat) {
 	t.Helper()
 
-	fake := testutil.NewFakeDeepSeek(t, turns)
-	client := deepseek.New("test-key", fake.URL)
+	fake := testutil.NewFakeChat(t, turns)
+	client := chatcompletions.NewClient("test-key", fake.URL)
 	client.Backoff = func(int) time.Duration { return 0 }
 	if o.Cwd == "" {
 		o.Cwd = t.TempDir()
@@ -382,7 +382,7 @@ func TestAgentLoopAPIRetryRecovery(t *testing.T) {
 
 func assertRequestHistory(
 	t *testing.T,
-	fake *testutil.FakeDeepSeek,
+	fake *testutil.FakeChat,
 	requestIndex int,
 	originalPrompt string,
 	toolCallIDs ...string,
@@ -423,7 +423,7 @@ func assertRequestHistory(
 	}
 }
 
-func lastRequestMessage(t *testing.T, fake *testutil.FakeDeepSeek, requestIndex int) map[string]any {
+func lastRequestMessage(t *testing.T, fake *testutil.FakeChat, requestIndex int) map[string]any {
 	t.Helper()
 
 	messages := requestMessages(t, fake, requestIndex)
@@ -434,7 +434,7 @@ func lastRequestMessage(t *testing.T, fake *testutil.FakeDeepSeek, requestIndex 
 	return message
 }
 
-func requestMessages(t *testing.T, fake *testutil.FakeDeepSeek, requestIndex int) []any {
+func requestMessages(t *testing.T, fake *testutil.FakeChat, requestIndex int) []any {
 	t.Helper()
 
 	request := fake.Request(requestIndex)

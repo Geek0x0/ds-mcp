@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/rollout"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -65,8 +65,8 @@ func TestRunnerWritesRollout(t *testing.T) {
 		CompletionTokensDetails: &openai.CompletionTokensDetails{ReasoningTokens: 2},
 	}
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{Reasoning: "plan", Content: "working", ToolCalls: []openai.ToolCall{shell, applyPatch}, Usage: usage}},
-		{result: &deepseek.TurnResult{Content: "all done", Usage: usage}},
+		{result: &chatcompletions.TurnResult{Reasoning: "plan", Content: "working", ToolCalls: []openai.ToolCall{shell, applyPatch}, Usage: usage}},
+		{result: &chatcompletions.TurnResult{Content: "all done", Usage: usage}},
 	}}
 	session := newTestSession(t, Options{Sandbox: "danger-full-access", RequestedReasoningEffort: "xhigh"})
 	recorder := rollout.Open(session.ID, time.Now())

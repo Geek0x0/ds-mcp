@@ -1,4 +1,4 @@
-package deepseek
+package chatcompletions
 
 import (
 	"context"
@@ -24,7 +24,8 @@ type Client struct {
 	Backoff func(attempt int) time.Duration
 }
 
-func New(apiKey, baseURL string) *Client {
+// NewClient builds a low-level Chat Completions client.
+func NewClient(apiKey, baseURL string) *Client {
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = baseURL
 

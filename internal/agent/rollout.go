@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
 	"github.com/Geek0x0/subagent-mcp/internal/patch"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -63,7 +63,7 @@ func recordTurnStart(s *Session, prompt string, started time.Time) {
 	s.rollout.Event(map[string]any{"type": "user_message", "message": prompt})
 }
 
-func recordModelTurn(s *Session, res *deepseek.TurnResult) {
+func recordModelTurn(s *Session, res *chatcompletions.TurnResult) {
 	if res.Reasoning != "" {
 		s.rollout.Item(map[string]any{"type": "reasoning", "summary": []any{}, "content": textContent("reasoning_text", res.Reasoning)})
 	}

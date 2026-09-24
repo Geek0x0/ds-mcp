@@ -1,7 +1,7 @@
 package testutil
 
 // ponytail: Go's default same-package coverage attribution makes this shared test
-// infrastructure read near-zero because internal/deepseek and internal/agent tests
+// infrastructure read near-zero because internal/provider/chatcompletions and internal/agent tests
 // exercise it. Use -coverpkg=./... for a direct read, or exclude internal/testutil
 // from the aggregate when enforcing a same-package coverage threshold.
 
@@ -32,7 +32,7 @@ type FakeTurn struct {
 	ToolCalls []FakeToolCall
 }
 
-type FakeDeepSeek struct {
+type FakeChat struct {
 	*httptest.Server
 
 	t        testing.TB
@@ -41,7 +41,7 @@ type FakeDeepSeek struct {
 	requests []map[string]any
 }
 
-func NewFakeDeepSeek(t testing.TB, turns []FakeTurn) *FakeDeepSeek {
+func NewFakeChat(t testing.TB, turns []FakeTurn) *FakeChat {
 	t.Helper()
 	for i, turn := range turns {
 		if turn.Text != "" && len(turn.ToolCalls) > 0 {
@@ -49,7 +49,7 @@ func NewFakeDeepSeek(t testing.TB, turns []FakeTurn) *FakeDeepSeek {
 		}
 	}
 
-	fake := &FakeDeepSeek{
+	fake := &FakeChat{
 		t:     t,
 		turns: append([]FakeTurn(nil), turns...),
 	}
@@ -62,14 +62,14 @@ func NewFakeDeepSeek(t testing.TB, turns []FakeTurn) *FakeDeepSeek {
 	return fake
 }
 
-func (f *FakeDeepSeek) RequestCount() int {
+func (f *FakeChat) RequestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	return len(f.requests)
 }
 
-func (f *FakeDeepSeek) Request(i int) map[string]any {
+func (f *FakeChat) Request(i int) map[string]any {
 	f.t.Helper()
 
 	f.mu.Lock()
@@ -82,7 +82,7 @@ func (f *FakeDeepSeek) Request(i int) map[string]any {
 	return f.requests[i]
 }
 
-func (f *FakeDeepSeek) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+func (f *FakeChat) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -209,7 +209,7 @@ func (f *FakeDeepSeek) handleChatCompletions(w http.ResponseWriter, r *http.Requ
 	flusher.Flush()
 }
 
-func (f *FakeDeepSeek) writeChunk(
+func (f *FakeChat) writeChunk(
 	w http.ResponseWriter,
 	flusher http.Flusher,
 	response openai.ChatCompletionStreamResponse,

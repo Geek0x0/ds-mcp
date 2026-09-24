@@ -13,15 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
 
 	openai "github.com/sashabaranov/go-openai"
 )
 
 type stubTurn struct {
-	result *deepseek.TurnResult
+	result *chatcompletions.TurnResult
 	err    error
 	deltas []string
 }
@@ -38,7 +38,7 @@ func (c *stubClient) ChatTurn(
 	ctx context.Context,
 	req openai.ChatCompletionRequest,
 	onDelta func(string),
-) (*deepseek.TurnResult, error) {
+) (*chatcompletions.TurnResult, error) {
 	c.mu.Lock()
 	requestCopy := req
 	requestCopy.Messages = append([]openai.ChatCompletionMessage(nil), req.Messages...)
@@ -152,7 +152,7 @@ func (a *stubApprover) recordedRequests() []ApprovalRequest {
 }
 
 func TestRunnerPureTextOneTurn(t *testing.T) {
-	client := &stubClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "done"}}}}
+	client := &stubClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "done"}}}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{})
 	runner := &Runner{Client: client, Emitter: emitter, Approver: &stubApprover{}}
@@ -189,7 +189,7 @@ func TestRunnerIncludesReasoningEffort(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &stubClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "done"}}}}
+			client := &stubClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "done"}}}}
 			session := newTestSession(t, test.options)
 			runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
@@ -211,8 +211,8 @@ func TestRunnerIncludesReasoningEffort(t *testing.T) {
 func TestRunnerShellToolCallThenText(t *testing.T) {
 	call := toolCall("call-shell", "shell", `{"command":"echo hi"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "ok"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "ok"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
@@ -265,8 +265,8 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 func TestRunnerPassesReasoningBackInHistory(t *testing.T) {
 	call := toolCall("call-1", "shell", `{"command":"echo hi"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{Reasoning: "plan A", ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "done"}},
+		{result: &chatcompletions.TurnResult{Reasoning: "plan A", ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "done"}},
 	}}
 	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
 	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
@@ -304,8 +304,8 @@ func TestRunnerEmptyFileResultHasNonEmptyToolContent(t *testing.T) {
 
 	call := toolCall("call-empty", "read_file", `{"path":"empty.txt"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "empty file handled"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "empty file handled"}},
 	}}
 	session := newTestSession(t, Options{
 		Cwd:      cwd,
@@ -331,8 +331,8 @@ func TestRunnerApprovalDenied(t *testing.T) {
 	const justification = "the requested change needs a file write"
 	call := toolCall("call-write", "write_file", `{"path":"out.txt","content":"hello","justification":"`+justification+`"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "blocked but finished"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "blocked but finished"}},
 	}}
 	emitter := &recEmitter{}
 	approver := &stubApprover{approved: false}
@@ -374,8 +374,8 @@ func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 	call := toolCall("call-panic", "shell", `{"command":"echo should-not-run"}`)
 	afterPanicCall := toolCall("call-after-panic", "shell", `{"command":"echo after-panic"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call, afterPanicCall}}},
-		{result: &deepseek.TurnResult{Content: "recovered"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call, afterPanicCall}}},
+		{result: &chatcompletions.TurnResult{Content: "recovered"}},
 	}}
 	recorder := &recEmitter{}
 	emitter := &panicOnceEmitter{recorder: recorder, panicType: "exec_command_begin"}
@@ -433,8 +433,8 @@ func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 func TestRunnerNeverPolicyDenial(t *testing.T) {
 	call := toolCall("call-rm", "shell", `{"command":"rm x"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "not removed"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "not removed"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
@@ -459,9 +459,9 @@ func TestRunnerTurnLimitReachedThenResumed(t *testing.T) {
 	firstCall := toolCall("call-one", "shell", `{"command":"echo one"}`)
 	secondCall := toolCall("call-two", "shell", `{"command":"echo two"}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{firstCall}}},
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{secondCall}}},
-		{result: &deepseek.TurnResult{Content: "resumed"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{firstCall}}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{secondCall}}},
+		{result: &chatcompletions.TurnResult{Content: "resumed"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
@@ -530,7 +530,7 @@ func TestRunnerBusy(t *testing.T) {
 	unblock := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	client := &stubClient{
-		turns:   []stubTurn{{result: &deepseek.TurnResult{Content: "first done"}}},
+		turns:   []stubTurn{{result: &chatcompletions.TurnResult{Content: "first done"}}},
 		block:   unblock,
 		entered: entered,
 	}
@@ -677,7 +677,7 @@ func TestManagerCapsSessionCount(t *testing.T) {
 }
 
 func TestRunnerUpdatesLastUsed(t *testing.T) {
-	client := &stubClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "done"}}}}
+	client := &stubClient{turns: []stubTurn{{result: &chatcompletions.TurnResult{Content: "done"}}}}
 	session := newTestSession(t, Options{})
 	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
@@ -693,7 +693,7 @@ func TestRunnerUpdatesLastUsed(t *testing.T) {
 func TestRunnerClientErrorPreservesSessionAndUnlocks(t *testing.T) {
 	client := &stubClient{turns: []stubTurn{
 		{err: errors.New("upstream failed")},
-		{result: &deepseek.TurnResult{Content: "recovered"}},
+		{result: &chatcompletions.TurnResult{Content: "recovered"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{})
@@ -720,7 +720,7 @@ func TestRunnerClientErrorPreservesSessionAndUnlocks(t *testing.T) {
 
 func TestRunnerEmitsDeltasAndUsageInOrder(t *testing.T) {
 	client := &stubClient{turns: []stubTurn{{
-		result: &deepseek.TurnResult{
+		result: &chatcompletions.TurnResult{
 			Content: "done",
 			Usage: &openai.Usage{
 				PromptTokens:     7,
@@ -828,8 +828,8 @@ func runPatchOnce(t *testing.T, options Options, approver *stubApprover, patchTe
 	}
 	call := toolCall("call-patch", "apply_patch", string(arguments))
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "done"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "done"}},
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, options)
@@ -1006,8 +1006,8 @@ func runShellOnce(t *testing.T, options Options, approver *stubApprover, command
 	t.Helper()
 	call := toolCall("call-shell", "shell", `{"command":`+strconv.Quote(command)+`}`)
 	client := &stubClient{turns: []stubTurn{
-		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
-		{result: &deepseek.TurnResult{Content: "done"}},
+		{result: &chatcompletions.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &chatcompletions.TurnResult{Content: "done"}},
 	}}
 	session := newTestSession(t, options)
 	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: approver}

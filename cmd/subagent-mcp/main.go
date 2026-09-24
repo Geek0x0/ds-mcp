@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
 	dsserver "github.com/Geek0x0/subagent-mcp/internal/server"
 )
@@ -41,7 +41,7 @@ func main() {
 	if baseURL == "" {
 		baseURL = "https://api.deepseek.com"
 	}
-	if err := dsserver.New(deepseek.New(key, baseURL), version, options...).ServeStdio(); err != nil {
+	if err := dsserver.New(chatcompletions.NewClient(key, baseURL), version, options...).ServeStdio(); err != nil {
 		log.Fatal(err)
 	}
 }

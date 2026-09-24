@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
 	"github.com/Geek0x0/subagent-mcp/internal/patch"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/tools"
 
 	"github.com/google/uuid"
@@ -24,7 +24,7 @@ type ChatClient interface {
 		ctx context.Context,
 		req openai.ChatCompletionRequest,
 		onDelta func(string),
-	) (*deepseek.TurnResult, error)
+	) (*chatcompletions.TurnResult, error)
 }
 
 type Emitter interface {

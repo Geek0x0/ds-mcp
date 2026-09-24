@@ -82,6 +82,18 @@ func TestMainVersion(t *testing.T) {
 	}
 }
 
+func TestMainRejectsInvalidToolName(t *testing.T) {
+	if runMainChild(t) {
+		return
+	}
+
+	t.Setenv("DS_MCP_TOOL_NAME", "bad name")
+	output := runMainExpectingFailure(t, nil)
+	if !strings.Contains(output, "DS_MCP_TOOL_NAME") {
+		t.Fatalf("main() failure output = %q, want it to mention %q", output, "DS_MCP_TOOL_NAME")
+	}
+}
+
 func TestMainRejectsPermissiveAuthFile(t *testing.T) {
 	if runMainChild(t) {
 		return

@@ -44,6 +44,7 @@ ds-mcp exposes DeepSeek as a full MCP coding agent with real shell and file-tool
 |---|---:|---|
 | `DEEPSEEK_API_KEY` | No | DeepSeek API key. When set to a non-empty value, it takes precedence over the auth file. |
 | `DEEPSEEK_BASE_URL` | No | API base URL. Defaults to `https://api.deepseek.com`. |
+| `DS_MCP_TOOL_NAME` | No | Base name for the two MCP tools; defaults to `deepseek`. `codex` registers `codex` and `codex-reply`. |
 
 The server checks `DEEPSEEK_API_KEY` first. If it is unset or empty, the server falls back to `~/.config/ds-mcp/auth.json`, which must contain:
 
@@ -56,6 +57,24 @@ One of these credential sources is required. The auth file must have no group or
 Every shell command runs with all `DEEPSEEK_*` environment variables removed, so the agent cannot read the key from the server environment, and `read_file` refuses `~/.config/ds-mcp/auth.json` including when that file is reached through a symlink. On Linux, a sandboxed shell also cannot read the server's `/proc/<pid>/environ`, because Landlock blocks cross-domain ptrace-style access. A shell command can still read `auth.json` directly, however, because reads are not sandboxed; when dispatching through an MCP client it is therefore preferable to supply the key via `DEEPSEEK_API_KEY` in the MCP server `env` rather than relying on the auth file.
 
 ## Tools
+
+### Codex-compatible tool names
+
+Claude Code names MCP tools `mcp__<server name>__<tool name>`. Register the server under the name `codex` and set `DS_MCP_TOOL_NAME=codex`, and instructions written for Codex keep working: the tools are exposed as `mcp__codex__codex` and `mcp__codex__codex-reply`.
+
+```json
+{
+  "mcpServers": {
+    "codex": {
+      "type": "stdio",
+      "command": "ds-mcp",
+      "env": {"DS_MCP_TOOL_NAME": "codex"}
+    }
+  }
+}
+```
+
+The default `DS_MCP_TOOL_NAME=deepseek` exposes `mcp__deepseek__deepseek` and `mcp__deepseek__deepseek-reply`. The value must match `^[A-Za-z0-9_-]{1,64}$` and must not end with `-reply`; an invalid value fails startup with an error naming `DS_MCP_TOOL_NAME`.
 
 ### `deepseek`
 
@@ -72,6 +91,8 @@ Starts a new coding-agent thread.
 | `base-instructions` | No | Built-in instructions | Complete replacement for the built-in base system instructions. An empty or omitted value uses the built-in default. |
 | `developer-instructions` | No | None | Additional system instructions appended after the AGENTS.md blocks. An empty or omitted value appends nothing. |
 | `config` | No | `{}` | Loose object. Recognized keys: `max_turns` (number from 1 to 100000, default 50, out-of-range values silently ignored), `model_reasoning_effort` (same values as `reasoning-effort`; the top-level argument wins), and `writable_roots` (array of absolute paths to existing directories that the shell may also write under `workspace-write`). Invalid `model_reasoning_effort` or `writable_roots` values are errors; other unknown keys are silently ignored. |
+
+When dispatched units run `go test` under `workspace-write`, include the absolute path of the Go build cache in `config.writable_roots` (for example `/home/<user>/.cache/go-build`).
 
 The response includes `structuredContent.threadId`. Retain it to continue the session. Once a session is created, execution errors also return its `threadId`, so the session remains resumable.
 

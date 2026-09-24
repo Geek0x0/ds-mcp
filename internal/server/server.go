@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,10 @@ import (
 
 const (
 	maxConfiguredTurns = 100000
+
+	// defaultToolName is the base name of the two MCP tools when no
+	// WithToolName option is supplied.
+	defaultToolName = "deepseek"
 
 	// requestIDMetaKey is the _meta field the before-call-tool hook uses to hand
 	// the JSON-RPC request ID to the tool handlers, which cannot see it otherwise.
@@ -158,20 +163,58 @@ func parseWritableRoots(config map[string]any) ([]string, error) {
 }
 
 type Server struct {
-	mcp     *mcpserver.MCPServer
-	mgr     *agent.Manager
-	runner  *agent.Runner
-	version string
+	mcp      *mcpserver.MCPServer
+	mgr      *agent.Manager
+	runner   *agent.Runner
+	version  string
+	toolName string
 
 	callsMu sync.Mutex
 	calls   map[string]context.CancelFunc
 }
 
-func New(client agent.ChatClient, version string) *Server {
+// Option configures a Server during construction.
+type Option func(*Server)
+
+// WithToolName sets the base name of the two MCP tools. The start tool is
+// registered under name and the reply tool under name+"-reply".
+func WithToolName(name string) Option {
+	return func(s *Server) {
+		s.toolName = name
+	}
+}
+
+var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// ValidateToolName reports whether name is a valid DS_MCP_TOOL_NAME value. A
+// valid name is 1 to 64 characters from A-Z, a-z, 0-9, '_', and '-', and does
+// not end with "-reply", which would collide with the generated reply tool.
+func ValidateToolName(name string) error {
+	if !toolNamePattern.MatchString(name) {
+		return fmt.Errorf(
+			"DS_MCP_TOOL_NAME %q is invalid: the name must be 1 to 64 characters matching ^[A-Za-z0-9_-]{1,64}$",
+			name,
+		)
+	}
+	if strings.HasSuffix(name, "-reply") {
+		return fmt.Errorf(
+			"DS_MCP_TOOL_NAME %q is invalid: the name must not end with \"-reply\" because the reply tool is registered as %s-reply",
+			name,
+			name,
+		)
+	}
+	return nil
+}
+
+func New(client agent.ChatClient, version string, opts ...Option) *Server {
 	s := &Server{
-		mgr:     agent.NewManager(),
-		version: version,
-		calls:   make(map[string]context.CancelFunc),
+		mgr:      agent.NewManager(),
+		version:  version,
+		toolName: defaultToolName,
+		calls:    make(map[string]context.CancelFunc),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	hooks := &mcpserver.Hooks{}
 	hooks.AddBeforeCallTool(func(_ context.Context, id any, request *mcp.CallToolRequest) {
@@ -196,8 +239,8 @@ func New(client agent.ChatClient, version string) *Server {
 	)
 	s.mcp.AddNotificationHandler(cancelledNotificationMethod, s.handleCancelledNotification)
 	s.runner = &agent.Runner{Client: client, Emitter: s, Approver: s}
-	s.mcp.AddTool(deepseekTool(), s.handleDeepseek)
-	s.mcp.AddTool(replyTool(), s.handleReply)
+	s.mcp.AddTool(deepseekTool(s.toolName), s.handleDeepseek)
+	s.mcp.AddTool(replyTool(s.toolName), s.handleReply)
 	return s
 }
 
@@ -257,9 +300,9 @@ type toolOutput struct {
 	Content  string `json:"content" jsonschema_description:"Human-readable report text from the DeepSeek agent."`
 }
 
-func deepseekTool() mcp.Tool {
+func deepseekTool(name string) mcp.Tool {
 	return mcp.NewTool(
-		"deepseek",
+		name,
 		mcp.WithDescription("Start a new DeepSeek coding-agent thread."),
 		mcp.WithString(
 			"prompt",
@@ -302,14 +345,14 @@ func deepseekTool() mcp.Tool {
 	)
 }
 
-func replyTool() mcp.Tool {
+func replyTool(baseName string) mcp.Tool {
 	return mcp.NewTool(
-		"deepseek-reply",
+		baseName+"-reply",
 		mcp.WithDescription("Continue an existing DeepSeek coding-agent thread."),
 		mcp.WithString(
 			"threadId",
 			mcp.Required(),
-			mcp.Description("Thread ID returned by a previous deepseek or deepseek-reply call."),
+			mcp.Description(fmt.Sprintf("Thread ID returned by a previous %s or %s-reply call.", baseName, baseName)),
 		),
 		mcp.WithString(
 			"prompt",

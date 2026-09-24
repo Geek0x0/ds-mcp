@@ -5,6 +5,8 @@ description: Dispatch coding work units to the DeepSeek agent via the deepseek /
 
 # DeepSeek Dispatch
 
+The MCP tool names follow the server's `DS_MCP_TOOL_NAME` environment variable, which defaults to `deepseek`.
+
 ## New session vs reply
 
 Call `deepseek` for a new, independent work unit. Start a new session whenever the task needs a different working directory, model, sandbox, approval policy, instruction set, or turn limit. These settings are fixed when the session is created.

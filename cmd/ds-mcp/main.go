@@ -25,6 +25,14 @@ func main() {
 		return
 	}
 
+	var options []dsserver.Option
+	if toolName := os.Getenv("DS_MCP_TOOL_NAME"); toolName != "" {
+		if err := dsserver.ValidateToolName(toolName); err != nil {
+			log.Fatal(err)
+		}
+		options = append(options, dsserver.WithToolName(toolName))
+	}
+
 	key, err := resolveAPIKey()
 	if err != nil {
 		log.Fatal(err)
@@ -33,7 +41,7 @@ func main() {
 	if baseURL == "" {
 		baseURL = "https://api.deepseek.com"
 	}
-	if err := dsserver.New(deepseek.New(key, baseURL), version).ServeStdio(); err != nil {
+	if err := dsserver.New(deepseek.New(key, baseURL), version, options...).ServeStdio(); err != nil {
 		log.Fatal(err)
 	}
 }

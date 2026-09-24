@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -130,7 +131,7 @@ func TestToolDeclarations(t *testing.T) {
 	}{
 		{
 			name: "deepseek",
-			tool: deepseekTool(),
+			tool: deepseekTool("deepseek"),
 			properties: []string{
 				"approval-policy",
 				"base-instructions",
@@ -146,7 +147,7 @@ func TestToolDeclarations(t *testing.T) {
 		},
 		{
 			name:       "deepseek-reply",
-			tool:       replyTool(),
+			tool:       replyTool("deepseek"),
 			properties: []string{"prompt", "threadId"},
 			required:   []string{"prompt", "threadId"},
 		},
@@ -183,13 +184,143 @@ func TestToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestWithToolNameRegistersRenamedTools(t *testing.T) {
+	client := &stubChatClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{Content: "hi from codex"}},
+		{result: &deepseek.TurnResult{Content: "continued"}},
+	}}
+	s := New(client, "test", WithToolName("codex"))
+
+	listResponse := s.mcp.HandleMessage(
+		context.Background(),
+		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+	)
+	listMessage, ok := listResponse.(mcp.JSONRPCResponse)
+	if !ok {
+		t.Fatalf("tools/list response = %#v, want mcp.JSONRPCResponse", listResponse)
+	}
+	list, ok := listMessage.Result.(mcp.ListToolsResult)
+	if !ok {
+		t.Fatalf("tools/list result = %#v, want mcp.ListToolsResult", listMessage.Result)
+	}
+
+	names := make([]string, 0, len(list.Tools))
+	for _, tool := range list.Tools {
+		names = append(names, tool.Name)
+	}
+	sort.Strings(names)
+	if !reflect.DeepEqual(names, []string{"codex", "codex-reply"}) {
+		t.Fatalf("tool names = %v, want [codex codex-reply]", names)
+	}
+	if slices.Contains(names, "deepseek") {
+		t.Fatalf("tool names = %v, want no deepseek tool", names)
+	}
+
+	var reply mcp.Tool
+	for _, tool := range list.Tools {
+		if tool.Name == "codex-reply" {
+			reply = tool
+		}
+	}
+	threadIDProperty, ok := reply.InputSchema.Properties["threadId"].(map[string]any)
+	if !ok {
+		t.Fatalf("codex-reply threadId property = %#v, want map[string]any", reply.InputSchema.Properties["threadId"])
+	}
+	description, _ := threadIDProperty["description"].(string)
+	for _, want := range []string{"codex", "codex-reply"} {
+		if !strings.Contains(description, want) {
+			t.Errorf("codex-reply threadId description = %q, want it to mention %q", description, want)
+		}
+	}
+
+	call := func(name string, arguments map[string]any) *mcp.CallToolResult {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      2,
+			"method":  "tools/call",
+			"params": map[string]any{
+				"name":      name,
+				"arguments": arguments,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal tools/call: %v", err)
+		}
+		message := s.mcp.HandleMessage(context.Background(), raw)
+		response, ok := message.(mcp.JSONRPCResponse)
+		if !ok {
+			t.Fatalf("tools/call response = %#v, want mcp.JSONRPCResponse", message)
+		}
+		result, ok := response.Result.(*mcp.CallToolResult)
+		if !ok {
+			t.Fatalf("tools/call result = %#v, want *mcp.CallToolResult", response.Result)
+		}
+		return result
+	}
+
+	first := call("codex", map[string]any{"prompt": "hello", "cwd": t.TempDir()})
+	if first.IsError {
+		t.Fatalf("codex call = %#v, want success", first)
+	}
+	if got := toolResultText(t, first); got != "hi from codex" {
+		t.Fatalf("codex call text = %q, want %q", got, "hi from codex")
+	}
+	threadID := toolResultThreadID(t, first)
+
+	replyResult := call("codex-reply", map[string]any{"threadId": threadID, "prompt": "keep going"})
+	if replyResult.IsError {
+		t.Fatalf("codex-reply call = %#v, want success", replyResult)
+	}
+	if got := toolResultText(t, replyResult); got != "continued" {
+		t.Fatalf("codex-reply call text = %q, want %q", got, "continued")
+	}
+	if got := toolResultThreadID(t, replyResult); got != threadID {
+		t.Fatalf("codex-reply call threadId = %q, want %q", got, threadID)
+	}
+}
+
+func TestValidateToolName(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{name: "deepseek", valid: true},
+		{name: "codex", valid: true},
+		{name: "a_b-1", valid: true},
+		{name: "", valid: false},
+		{name: "has space", valid: false},
+		{name: "bad/char", valid: false},
+		{name: strings.Repeat("a", 65), valid: false},
+		{name: "codex-reply", valid: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateToolName(test.name)
+			if test.valid {
+				if err != nil {
+					t.Fatalf("ValidateToolName(%q) error = %v, want nil", test.name, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateToolName(%q) error = nil, want error", test.name)
+			}
+			if !strings.Contains(err.Error(), "DS_MCP_TOOL_NAME") {
+				t.Fatalf("ValidateToolName(%q) error = %q, want it to mention %q", test.name, err, "DS_MCP_TOOL_NAME")
+			}
+		})
+	}
+}
+
 func TestToolOutputSchemas(t *testing.T) {
 	tests := []struct {
 		name string
 		tool mcp.Tool
 	}{
-		{name: "deepseek", tool: deepseekTool()},
-		{name: "deepseek-reply", tool: replyTool()},
+		{name: "deepseek", tool: deepseekTool("deepseek")},
+		{name: "deepseek-reply", tool: replyTool("deepseek")},
 	}
 
 	for _, test := range tests {

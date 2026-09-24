@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Geek0x0/ds-mcp/internal/deepseek"
+	"github.com/Geek0x0/ds-mcp/internal/patch"
 	"github.com/Geek0x0/ds-mcp/internal/policy"
 	"github.com/Geek0x0/ds-mcp/internal/tools"
 
@@ -94,6 +96,24 @@ func builtinTools() []openai.Tool {
 						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
 					},
 					"required": ["path", "content"]
+				}`),
+			},
+		},
+		{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name: "apply_patch",
+				Description: "Edit files with a patch: '*** Begin Patch', then '*** Add File: <path>' (+lines), " +
+					"'*** Delete File: <path>', or '*** Update File: <path>' (optional '*** Move to: <path>') with '@@' chunks " +
+					"of ' ' context, '-' removed, and '+' added lines, then '*** End Patch'. Prefer this for editing existing files. " +
+					"The sandbox policy may deny the call; providing justification helps if approval is required.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"patch": {"type": "string", "description": "Complete patch text from *** Begin Patch to *** End Patch."},
+						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
+					},
+					"required": ["patch"]
 				}`),
 			},
 		},
@@ -197,6 +217,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		TimeoutSeconds int    `json:"timeout_seconds"`
 		Path           string `json:"path"`
 		Content        string `json:"content"`
+		Patch          string `json:"patch"`
 		Justification  string `json:"justification"`
 	}
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
@@ -204,35 +225,29 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 	}
 
 	switch toolCall.Function.Name {
-	case "shell", "read_file", "write_file":
+	case "shell", "read_file", "write_file", "apply_patch":
 	default:
 		return "unknown tool: " + toolCall.Function.Name
 	}
 
-	decision, reason := policy.Evaluate(s.sandbox, s.approval, policy.Request{
-		Tool:    toolCall.Function.Name,
-		Command: args.Command,
-		Path:    args.Path,
-		Cwd:     s.cwd,
-	})
-	approved := false
-	switch decision {
-	case policy.Deny:
-		return "operation denied by sandbox policy: " + reason
-	case policy.AskApproval:
-		approvalReason := reason
-		if args.Justification != "" {
-			approvalReason = fmt.Sprintf("%s (model justification: %s)", reason, args.Justification)
+	requests := []policy.Request{{Tool: toolCall.Function.Name, Command: args.Command, Path: args.Path, Cwd: s.cwd}}
+	var hunks []patch.Hunk
+	var paths []string
+	if toolCall.Function.Name == "apply_patch" {
+		parsed, err := patch.Parse(args.Patch)
+		if err != nil {
+			return "error: invalid patch: " + err.Error()
 		}
-		if !r.Approver.Approve(ctx, s.ID, ApprovalRequest{
-			Tool:    toolCall.Function.Name,
-			Command: args.Command,
-			Path:    args.Path,
-			Reason:  approvalReason,
-		}) {
-			return "operation denied: approval was not granted"
+		hunks = parsed
+		paths = patch.Paths(hunks)
+		requests = requests[:0]
+		for _, path := range paths {
+			requests = append(requests, policy.Request{Tool: "write_file", Path: path, Cwd: s.cwd})
 		}
-		approved = true
+	}
+	approved, denial := r.authorize(ctx, s, toolCall.Function.Name, args.Command, args.Justification, requests)
+	if denial != "" {
+		return denial
 	}
 
 	beginEvent := map[string]any{
@@ -240,9 +255,12 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		"call_id": toolCall.ID,
 		"tool":    toolCall.Function.Name,
 	}
-	if toolCall.Function.Name == "shell" {
+	switch toolCall.Function.Name {
+	case "shell":
 		beginEvent["command"] = args.Command
-	} else {
+	case "apply_patch":
+		beginEvent["paths"] = paths
+	default:
 		beginEvent["path"] = args.Path
 	}
 
@@ -253,7 +271,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 	}
 	var toolErr error
 	defer func() {
-		r.emitExecEnd(ctx, s, toolCall.ID, toolCall.Function.Name, exitCode, toolErr)
+		r.emitExecEnd(ctx, s, toolCall.ID, toolCall.Function.Name, exitCode, toolErr, paths)
 	}()
 	r.Emitter.Emit(ctx, s.ID, beginEvent)
 
@@ -295,9 +313,59 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 			return "error: " + err.Error()
 		}
 		return fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)
+
+	case "apply_patch":
+		changes, err := patch.Plan(s.cwd, hunks)
+		if err == nil {
+			err = patch.Commit(changes)
+		}
+		toolErr = err
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return patch.Summary(changes)
 	}
 
 	return "unknown tool: " + toolCall.Function.Name
+}
+
+// authorize evaluates every request; any Deny rejects the call, and all
+// approval-requiring requests are combined into one approval prompt.
+func (r *Runner) authorize(
+	ctx context.Context,
+	s *Session,
+	tool, command, justification string,
+	requests []policy.Request,
+) (approved bool, denial string) {
+	var reasons, paths []string
+	for _, req := range requests {
+		decision, reason := policy.Evaluate(s.sandbox, s.approval, req)
+		switch decision {
+		case policy.Deny:
+			return false, "operation denied by sandbox policy: " + reason
+		case policy.AskApproval:
+			reasons = append(reasons, reason)
+			if req.Path != "" {
+				paths = append(paths, req.Path)
+			}
+		}
+	}
+	if len(reasons) == 0 {
+		return false, ""
+	}
+	approvalReason := strings.Join(reasons, "; ")
+	if justification != "" {
+		approvalReason = fmt.Sprintf("%s (model justification: %s)", approvalReason, justification)
+	}
+	if !r.Approver.Approve(ctx, s.ID, ApprovalRequest{
+		Tool:    tool,
+		Command: command,
+		Path:    strings.Join(paths, ", "),
+		Reason:  approvalReason,
+	}) {
+		return false, "operation denied: approval was not granted"
+	}
+	return true, ""
 }
 
 func (r *Runner) emitExecEnd(
@@ -307,6 +375,7 @@ func (r *Runner) emitExecEnd(
 	tool string,
 	exitCode *int,
 	err error,
+	paths []string,
 ) {
 	endEvent := map[string]any{
 		"type":    "exec_command_end",
@@ -315,6 +384,9 @@ func (r *Runner) emitExecEnd(
 	}
 	if exitCode != nil {
 		endEvent["exit_code"] = *exitCode
+	}
+	if paths != nil {
+		endEvent["paths"] = paths
 	}
 	if err != nil {
 		endEvent["error"] = err.Error()

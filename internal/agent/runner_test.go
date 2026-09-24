@@ -650,14 +650,15 @@ func TestRunnerEmitsDeltasAndUsageInOrder(t *testing.T) {
 
 func TestBuiltinTools(t *testing.T) {
 	tools := builtinTools()
-	if len(tools) != 3 {
-		t.Fatalf("builtin tool count = %d, want 3", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("builtin tool count = %d, want 4", len(tools))
 	}
 
 	wantRequired := map[string][]string{
-		"shell":      {"command"},
-		"read_file":  {"path"},
-		"write_file": {"path", "content"},
+		"shell":       {"command"},
+		"read_file":   {"path"},
+		"write_file":  {"path", "content"},
+		"apply_patch": {"patch"},
 	}
 	for _, tool := range tools {
 		if tool.Type != openai.ToolTypeFunction || tool.Function == nil {
@@ -698,6 +699,93 @@ func TestBuiltinTools(t *testing.T) {
 				t.Errorf("shell timeout_seconds = %#v", timeout)
 			}
 		}
+	}
+}
+
+func runPatchOnce(t *testing.T, options Options, approver *stubApprover, patchText string) (string, *recEmitter) {
+	t.Helper()
+	arguments, err := json.Marshal(map[string]string{"patch": patchText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := toolCall("call-patch", "apply_patch", string(arguments))
+	client := &stubClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{call}}},
+		{result: &deepseek.TurnResult{Content: "done"}},
+	}}
+	emitter := &recEmitter{}
+	session := newTestSession(t, options)
+	runner := &Runner{Client: client, Emitter: emitter, Approver: approver}
+	if _, err := runner.Run(context.Background(), session, "patch it"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	return findToolMessage(t, client.recordedRequests()[1].Messages, call.ID).Content, emitter
+}
+
+func TestRunnerApplyPatchUpdatesFile(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, emitter := runPatchOnce(t, Options{Cwd: cwd}, &stubApprover{},
+		"*** Begin Patch\n*** Update File: a.txt\n-old\n+new\n*** End Patch")
+
+	if !strings.HasPrefix(result, "Success. Updated the following files:") {
+		t.Fatalf("result = %q", result)
+	}
+	data, _ := os.ReadFile(filepath.Join(cwd, "a.txt"))
+	if string(data) != "new\n" {
+		t.Fatalf("a.txt = %q", data)
+	}
+	events := emitter.recordedEvents()
+	begin := events[1]
+	if begin["type"] != "exec_command_begin" || begin["tool"] != "apply_patch" ||
+		!reflect.DeepEqual(begin["paths"], []string{"a.txt"}) {
+		t.Fatalf("begin event = %#v", begin)
+	}
+	if end := events[2]; end["type"] != "exec_command_end" || !reflect.DeepEqual(end["paths"], []string{"a.txt"}) {
+		t.Fatalf("end event = %#v", end)
+	}
+}
+
+func TestRunnerApplyPatchDeniesAnyPathOutsideCwd(t *testing.T) {
+	cwd := t.TempDir()
+	result, emitter := runPatchOnce(t, Options{Cwd: cwd, Sandbox: "workspace-write", Approval: "never"}, &stubApprover{},
+		"*** Begin Patch\n*** Add File: inside.txt\n+x\n*** Add File: ../outside.txt\n+y\n*** End Patch")
+
+	if !strings.Contains(result, "denied") {
+		t.Fatalf("result = %q, want denial", result)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "inside.txt")); !os.IsNotExist(err) {
+		t.Fatalf("inside.txt written despite denial")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cwd), "outside.txt")); !os.IsNotExist(err) {
+		t.Fatalf("outside.txt written despite denial")
+	}
+	if containsEventType(t, emitter.recordedEvents(), "exec_command_begin") {
+		t.Fatalf("denied patch emitted exec_command_begin")
+	}
+}
+
+func TestRunnerApplyPatchSingleApprovalListsPaths(t *testing.T) {
+	cwd := t.TempDir()
+	approver := &stubApprover{approved: true}
+	result, _ := runPatchOnce(t, Options{Cwd: cwd, Sandbox: "read-only", Approval: "on-request"}, approver,
+		"*** Begin Patch\n*** Add File: a.txt\n+x\n*** Add File: b.txt\n+y\n*** End Patch")
+
+	if !strings.HasPrefix(result, "Success.") {
+		t.Fatalf("result = %q", result)
+	}
+	requests := approver.recordedRequests()
+	if len(requests) != 1 || requests[0].Tool != "apply_patch" || requests[0].Path != "a.txt, b.txt" {
+		t.Fatalf("approval requests = %#v", requests)
+	}
+}
+
+func TestRunnerApplyPatchInvalidPatch(t *testing.T) {
+	result, _ := runPatchOnce(t, Options{}, &stubApprover{}, "not a patch")
+	if !strings.HasPrefix(result, "error: invalid patch:") {
+		t.Fatalf("result = %q", result)
 	}
 }
 

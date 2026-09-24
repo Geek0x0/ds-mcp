@@ -71,23 +71,43 @@ func TestLoadRelativePathStoredAbsolute(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	cfg, err := Load("config.toml")
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+
+	// t.Chdir sets PWD to the path it was given and filepath.Abs prefers $PWD,
+	// so cfg.Path may keep a symlinked form of the cwd (for example /var rather
+	// than /private/var on macOS). Resolve both sides before comparing; the
+	// IsAbs check is what guards the fix itself.
+	check := func(t *testing.T, base string) {
+		t.Helper()
+		cfg, err := Load("config.toml")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if !filepath.IsAbs(cfg.Path) {
+			t.Fatalf("cfg.Path = %q, want an absolute path", cfg.Path)
+		}
+		got, err := filepath.EvalSymlinks(cfg.Path)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", cfg.Path, err)
+		}
+		want, err := filepath.EvalSymlinks(filepath.Join(base, "config.toml"))
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", filepath.Join(base, "config.toml"), err)
+		}
+		if got != want {
+			t.Fatalf("cfg.Path resolves to %q, want %q", got, want)
+		}
 	}
-	if !filepath.IsAbs(cfg.Path) {
-		t.Fatalf("cfg.Path = %q, want an absolute path", cfg.Path)
-	}
-	// The process cwd may differ from the temp dir after symlink resolution
-	// (for example /var vs /private/var on macOS), so compare against the
-	// resolved temp dir.
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(resolvedDir, "config.toml"); cfg.Path != want {
-		t.Fatalf("cfg.Path = %q, want %q", cfg.Path, want)
-	}
+
+	check(t, dir)
+
+	t.Run("via symlinked cwd", func(t *testing.T) {
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(dir, link); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(link)
+		check(t, link)
+	})
 }
 
 func TestAPIKey(t *testing.T) {

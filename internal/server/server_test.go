@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Geek0x0/subagent-mcp/internal/agent"
+	"github.com/Geek0x0/subagent-mcp/internal/config"
 	"github.com/Geek0x0/subagent-mcp/internal/provider"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -123,6 +124,16 @@ func (s *fakeElicitationSession) RequestElicitation(
 	return s.result, s.err
 }
 
+// testProviderConfig is the active-provider configuration used by server tests.
+func testProviderConfig() config.Provider {
+	return config.Provider{
+		API:          config.APIChatCompletions,
+		DefaultModel: "m-fast",
+		Models:       []config.Model{{ID: "m-fast", Description: "fast"}, {ID: "m-pro"}},
+		EffortMap:    map[string]string{"xhigh": "max"},
+	}
+}
+
 func TestToolDeclarations(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -132,7 +143,7 @@ func TestToolDeclarations(t *testing.T) {
 	}{
 		{
 			name: "subagent",
-			tool: deepseekTool("subagent"),
+			tool: startTool("subagent", testProviderConfig()),
 			properties: []string{
 				"approval-policy",
 				"base-instructions",
@@ -190,7 +201,7 @@ func TestWithToolNameRegistersRenamedTools(t *testing.T) {
 		{result: &provider.TurnResult{Text: "hi from codex"}},
 		{result: &provider.TurnResult{Text: "continued"}},
 	}}
-	s := New(client, "test", WithToolName("codex"))
+	s := New(client, testProviderConfig(), "test", WithToolName("codex"))
 
 	listResponse := s.mcp.HandleMessage(
 		context.Background(),
@@ -213,8 +224,8 @@ func TestWithToolNameRegistersRenamedTools(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{"codex", "codex-reply"}) {
 		t.Fatalf("tool names = %v, want [codex codex-reply]", names)
 	}
-	if slices.Contains(names, "deepseek") {
-		t.Fatalf("tool names = %v, want no deepseek tool", names)
+	if slices.Contains(names, "subagent") {
+		t.Fatalf("tool names = %v, want no default subagent tool", names)
 	}
 
 	var reply mcp.Tool
@@ -320,7 +331,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		name string
 		tool mcp.Tool
 	}{
-		{name: "subagent", tool: deepseekTool("subagent")},
+		{name: "subagent", tool: startTool("subagent", testProviderConfig())},
 		{name: "subagent-reply", tool: replyTool("subagent")},
 	}
 
@@ -352,7 +363,89 @@ func TestToolOutputSchemas(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekValidation(t *testing.T) {
+// toolInputSchemaJSON returns the JSON encoding of the named tool's input schema.
+func toolInputSchemaJSON(t *testing.T, s *Server, name string) string {
+	t.Helper()
+	response := s.mcp.HandleMessage(
+		context.Background(),
+		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`),
+	)
+	message, ok := response.(mcp.JSONRPCResponse)
+	if !ok {
+		t.Fatalf("tools/list response = %#v, want mcp.JSONRPCResponse", response)
+	}
+	list, ok := message.Result.(mcp.ListToolsResult)
+	if !ok {
+		t.Fatalf("tools/list result = %#v, want mcp.ListToolsResult", message.Result)
+	}
+	for _, tool := range list.Tools {
+		if tool.Name != name {
+			continue
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal input schema: %v", err)
+		}
+		return string(raw)
+	}
+	t.Fatalf("tool %q not found in tools/list", name)
+	return ""
+}
+
+func TestModelParameterFromConfig(t *testing.T) {
+	s := New(&stubProvider{}, testProviderConfig(), "test")
+	schema := toolInputSchemaJSON(t, s, "subagent")
+	for _, want := range []string{`"m-fast"`, `"m-pro"`, "default: m-fast", "m-fast (fast)"} {
+		if !strings.Contains(schema, want) {
+			t.Errorf("schema %s lacks %q", schema, want)
+		}
+	}
+	for _, effort := range config.EffortValues {
+		if !strings.Contains(schema, `"`+effort+`"`) {
+			t.Errorf("schema lacks effort %q", effort)
+		}
+	}
+}
+
+func TestModelDefaultAndRejection(t *testing.T) {
+	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
+	s := New(client, testProviderConfig(), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir()}))
+	if err != nil || result.IsError || client.recordedRequests()[0].Model != "m-fast" {
+		t.Fatalf("default model not applied: %#v %v", result, err)
+	}
+	result, err = s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir(), "model": "deepseek-flash"}))
+	if err != nil || !result.IsError {
+		t.Fatalf("unknown model accepted: %#v %v", result, err)
+	}
+	text := toolResultText(t, result)
+	for _, want := range []string{"deepseek-flash", "m-fast", "m-pro"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error %q lacks %q", text, want)
+		}
+	}
+}
+
+func TestEffortPassThroughAndMap(t *testing.T) {
+	for _, tc := range []struct{ requested, sent string }{
+		{"xhigh", "max"}, {"medium", "medium"}, {"none", "none"}, {"", "high"},
+	} {
+		client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
+		s := New(client, testProviderConfig(), "test")
+		args := map[string]any{"prompt": "hi", "cwd": t.TempDir()}
+		if tc.requested != "" {
+			args["reasoning-effort"] = tc.requested
+		}
+		if _, err := s.handleStart(context.Background(), callToolRequest("subagent", args)); err != nil {
+			t.Fatal(err)
+		}
+		if got := client.recordedRequests()[0].Effort; got != tc.sent {
+			t.Errorf("requested %q: sent %q, want %q", tc.requested, got, tc.sent)
+		}
+	}
+}
+
+func TestHandleStartValidation(t *testing.T) {
 	nonexistent := filepath.Join(t.TempDir(), "missing")
 	tests := []struct {
 		name     string
@@ -377,7 +470,7 @@ func TestHandleDeepseekValidation(t *testing.T) {
 		{
 			name:     "invalid reasoning effort",
 			args:     map[string]any{"prompt": "hello", "reasoning-effort": "bogus"},
-			contains: []string{"reasoning-effort", "bogus", "low", "medium", "high", "xhigh", "max"},
+			contains: []string{"reasoning-effort", "bogus", "none", "minimal", "low", "medium", "high", "xhigh", "max"},
 		},
 		{
 			name:     "relative cwd",
@@ -398,13 +491,13 @@ func TestHandleDeepseekValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, "test")
-			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", test.args))
+			s := New(&stubProvider{}, testProviderConfig(), "test")
+			result, err := s.handleStart(context.Background(), callToolRequest("subagent", test.args))
 			if err != nil {
-				t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+				t.Fatalf("handleStart() Go error = %v, want nil", err)
 			}
 			if !result.IsError {
-				t.Fatalf("handleDeepseek() result = %#v, want tool error", result)
+				t.Fatalf("handleStart() result = %#v, want tool error", result)
 			}
 			text := toolResultText(t, result)
 			for _, want := range test.contains {
@@ -416,22 +509,22 @@ func TestHandleDeepseekValidation(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T) {
+func TestHandleStartIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("REPO-RULE"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt":                 "hello",
 		"cwd":                    cwd,
 		"base-instructions":      "BASE-INSTRUCTIONS",
 		"developer-instructions": "DEV-INSTRUCTIONS",
 	}))
 	if err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
 	}
 	system := client.recordedRequests()[0].System
 	base := strings.Index(system, "BASE-INSTRUCTIONS")
@@ -442,47 +535,47 @@ func TestHandleDeepseekIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T)
 	}
 }
 
-func TestHandleDeepseekAgentsMDReadErrorFails(t *testing.T) {
+func TestHandleStartAgentsMDReadErrorFails(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.Mkdir(filepath.Join(cwd, "AGENTS.md"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := New(&stubProvider{}, "test")
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	s := New(&stubProvider{}, testProviderConfig(), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    cwd,
 	}))
 	if err != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "AGENTS.md") {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want AGENTS.md tool error", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want AGENTS.md tool error", result, err)
 	}
 }
 
-func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
+func TestHandleStartAndReplyContinueSession(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{
 		{result: &provider.TurnResult{Text: "hi"}},
 		{result: &provider.TurnResult{Text: "continued"}},
 	}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	first, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	first, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
 	}))
 	if err != nil {
-		t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+		t.Fatalf("handleStart() Go error = %v, want nil", err)
 	}
 	if first.IsError {
-		t.Fatalf("handleDeepseek() result = %#v, want success", first)
+		t.Fatalf("handleStart() result = %#v, want success", first)
 	}
 	if got := toolResultText(t, first); got != "hi" {
-		t.Fatalf("handleDeepseek() text = %q, want %q", got, "hi")
+		t.Fatalf("handleStart() text = %q, want %q", got, "hi")
 	}
 	if got := toolResultContent(t, first); got != "hi" {
-		t.Fatalf("handleDeepseek() message = %q, want %q", got, "hi")
+		t.Fatalf("handleStart() message = %q, want %q", got, "hi")
 	}
 	threadID := toolResultThreadID(t, first)
 
-	reply, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
+	reply, err := s.handleReply(context.Background(), callToolRequest("subagent-reply", map[string]any{
 		"threadId": threadID,
 		"prompt":   "keep going",
 	}))
@@ -503,14 +596,14 @@ func TestHandleDeepseekAndReplyContinueSession(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
+func TestHandleStartAppliesModelAndInstructions(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt":                 "hello",
 		"cwd":                    t.TempDir(),
-		"model":                  "deepseek-reasoner",
+		"model":                  "m-pro",
 		"reasoning-effort":       "max",
 		"base-instructions":      "custom base",
 		"developer-instructions": "custom developer",
@@ -519,15 +612,15 @@ func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
 		},
 	}))
 	if err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
 	}
 
 	requests := client.recordedRequests()
 	if len(requests) != 1 {
 		t.Fatalf("request count = %d, want 1", len(requests))
 	}
-	if requests[0].Model != "deepseek-reasoner" {
-		t.Fatalf("model = %q, want %q", requests[0].Model, "deepseek-reasoner")
+	if requests[0].Model != "m-pro" {
+		t.Fatalf("model = %q, want %q", requests[0].Model, "m-pro")
 	}
 	if requests[0].Effort != "max" {
 		t.Fatalf("reasoning effort = %q, want %q", requests[0].Effort, "max")
@@ -537,16 +630,16 @@ func TestHandleDeepseekAppliesModelAndInstructions(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekDefaultsReasoningEffort(t *testing.T) {
+func TestHandleStartDefaultsReasoningEffort(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
 	}))
 	if err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
 	}
 
 	requests := client.recordedRequests()
@@ -558,16 +651,18 @@ func TestHandleDeepseekDefaultsReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekReasoningEffortSources(t *testing.T) {
+func TestHandleStartReasoningEffortSources(t *testing.T) {
 	tests := []struct {
 		name string
 		args map[string]any
 		want string
 	}{
-		{name: "config xhigh maps to max", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "xhigh"}}, want: "max"},
-		{name: "config medium maps to high", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "medium"}}, want: "high"},
+		{name: "config xhigh maps through effort_map", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "xhigh"}}, want: "max"},
+		{name: "config medium passes through", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "medium"}}, want: "medium"},
+		{name: "config minimal passes through", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "minimal"}}, want: "minimal"},
 		{name: "config high", args: map[string]any{"config": map[string]any{"model_reasoning_effort": "high"}}, want: "high"},
-		{name: "top-level xhigh maps to max", args: map[string]any{"reasoning-effort": "xhigh"}, want: "max"},
+		{name: "top-level xhigh maps through effort_map", args: map[string]any{"reasoning-effort": "xhigh"}, want: "max"},
+		{name: "top-level none passes through", args: map[string]any{"reasoning-effort": "none"}, want: "none"},
 		{name: "top-level wins over config", args: map[string]any{"reasoning-effort": "low", "config": map[string]any{"model_reasoning_effort": "max"}}, want: "low"},
 		{name: "empty top-level falls back to config", args: map[string]any{"reasoning-effort": "", "config": map[string]any{"model_reasoning_effort": "max"}}, want: "max"},
 	}
@@ -575,15 +670,15 @@ func TestHandleDeepseekReasoningEffortSources(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-			s := New(client, "test")
+			s := New(client, testProviderConfig(), "test")
 			args := map[string]any{"prompt": "hello", "cwd": t.TempDir()}
 			for key, value := range test.args {
 				args[key] = value
 			}
 
-			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", args))
+			result, err := s.handleStart(context.Background(), callToolRequest("subagent", args))
 			if err != nil || result.IsError {
-				t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+				t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
 			}
 			requests := client.recordedRequests()
 			if len(requests) != 1 {
@@ -596,26 +691,26 @@ func TestHandleDeepseekReasoningEffortSources(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekRejectsInvalidConfigReasoningEffort(t *testing.T) {
+func TestHandleStartRejectsInvalidConfigReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name     string
 		value    any
 		contains []string
 	}{
-		{name: "unknown value", value: "ultra", contains: []string{"config.model_reasoning_effort", "ultra", "xhigh"}},
+		{name: "unknown value", value: "ultra", contains: []string{"config.model_reasoning_effort", "ultra", "none", "minimal", "xhigh"}},
 		{name: "non-string", value: 3, contains: []string{"config.model_reasoning_effort", "string"}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, "test")
-			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+			s := New(&stubProvider{}, testProviderConfig(), "test")
+			result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 				"prompt": "hello",
 				"cwd":    t.TempDir(),
 				"config": map[string]any{"model_reasoning_effort": test.value},
 			}))
 			if err != nil || !result.IsError {
-				t.Fatalf("handleDeepseek() = (%#v, %v), want tool error", result, err)
+				t.Fatalf("handleStart() = (%#v, %v), want tool error", result, err)
 			}
 			text := toolResultText(t, result)
 			for _, want := range test.contains {
@@ -628,8 +723,8 @@ func TestHandleDeepseekRejectsInvalidConfigReasoningEffort(t *testing.T) {
 }
 
 func TestHandleReplyUnknownThread(t *testing.T) {
-	s := New(&stubProvider{}, "test")
-	result, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
+	s := New(&stubProvider{}, testProviderConfig(), "test")
+	result, err := s.handleReply(context.Background(), callToolRequest("subagent-reply", map[string]any{
 		"threadId": "not-a-thread",
 		"prompt":   "hello",
 	}))
@@ -653,7 +748,7 @@ func TestHandleReplyBusy(t *testing.T) {
 		block:   unblock,
 		entered: entered,
 	}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 	cwd := t.TempDir()
 	threadIDs := make(chan string, 1)
 	s.runner.Emitter = emitterFunc(func(_ context.Context, threadID string, _ map[string]any) {
@@ -666,7 +761,7 @@ func TestHandleReplyBusy(t *testing.T) {
 	firstResult := make(chan *mcp.CallToolResult, 1)
 	firstError := make(chan error, 1)
 	go func() {
-		result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 			"prompt": "first",
 			"cwd":    cwd,
 		}))
@@ -678,15 +773,15 @@ func TestHandleReplyBusy(t *testing.T) {
 	select {
 	case threadID = <-threadIDs:
 	case <-time.After(2 * time.Second):
-		t.Fatal("first handleDeepseek() did not emit its threadId")
+		t.Fatal("first handleStart() did not emit its threadId")
 	}
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("first handleDeepseek() did not reach the blocked client")
+		t.Fatal("first handleStart() did not reach the blocked client")
 	}
 
-	busy, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
+	busy, err := s.handleReply(context.Background(), callToolRequest("subagent-reply", map[string]any{
 		"threadId": threadID,
 		"prompt":   "second",
 	}))
@@ -708,13 +803,13 @@ func TestHandleReplyBusy(t *testing.T) {
 	select {
 	case result := <-firstResult:
 		if result == nil || result.IsError || toolResultText(t, result) != "first done" {
-			t.Fatalf("first handleDeepseek() result = %#v, want success", result)
+			t.Fatalf("first handleStart() result = %#v, want success", result)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("first handleDeepseek() did not finish after unblocking the client")
+		t.Fatal("first handleStart() did not finish after unblocking the client")
 	}
 	if err := <-firstError; err != nil {
-		t.Fatalf("first handleDeepseek() Go error = %v, want nil", err)
+		t.Fatalf("first handleStart() Go error = %v, want nil", err)
 	}
 }
 
@@ -735,7 +830,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 
 			entered := make(chan struct{}, 1)
 			client := &stubProvider{block: unblock, entered: entered}
-			s := New(client, "test")
+			s := New(client, testProviderConfig(), "test")
 
 			rawCall := fmt.Sprintf(
 				`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"subagent","arguments":{"prompt":"hello","cwd":%q,"approval-policy":"never"}}}`,
@@ -784,7 +879,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 			client.block = nil
 			client.turns = []stubTurn{{result: &provider.TurnResult{Text: "recovered"}}}
 			client.mu.Unlock()
-			reply, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
+			reply, err := s.handleReply(context.Background(), callToolRequest("subagent-reply", map[string]any{
 				"threadId": threadID,
 				"prompt":   "continue after cancellation",
 			}))
@@ -803,7 +898,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 
 func TestCancelledNotificationUnknownIDIsIgnored(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
 	for _, raw := range []string{
 		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"no-such-call","reason":"stale"}}`,
@@ -816,37 +911,37 @@ func TestCancelledNotificationUnknownIDIsIgnored(t *testing.T) {
 		}
 	}
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
 	}))
 	if err != nil {
-		t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+		t.Fatalf("handleStart() Go error = %v, want nil", err)
 	}
 	if result.IsError {
-		t.Fatalf("handleDeepseek() result = %#v, want success", result)
+		t.Fatalf("handleStart() result = %#v, want success", result)
 	}
 	if text := toolResultText(t, result); text != "ok" {
-		t.Fatalf("handleDeepseek() text = %q, want %q", text, "ok")
+		t.Fatalf("handleStart() text = %q, want %q", text, "ok")
 	}
 }
 
-func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
+func TestHandleStartTurnLimitPreservesThreadID(t *testing.T) {
 	client := &stubProvider{repeat: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 		toolCall("call-forever", "unknown_tool", `{}`),
 	}}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "never finish",
 		"cwd":    t.TempDir(),
 		"config": map[string]any{"max_turns": float64(1)},
 	}))
 	if err != nil {
-		t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+		t.Fatalf("handleStart() Go error = %v, want nil", err)
 	}
 	if !result.IsError {
-		t.Fatalf("handleDeepseek() result = %#v, want turn-limit tool error", result)
+		t.Fatalf("handleStart() result = %#v, want turn-limit tool error", result)
 	}
 	text := toolResultText(t, result)
 	if !strings.Contains(text, "turn limit reached (1)") {
@@ -860,7 +955,7 @@ func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekIgnoresExcessiveMaxTurns(t *testing.T) {
+func TestHandleStartIgnoresExcessiveMaxTurns(t *testing.T) {
 	toolTurn := stubTurn{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 		toolCall("call-forever", "unknown_tool", `{}`),
 	}}}
@@ -870,18 +965,18 @@ func TestHandleDeepseekIgnoresExcessiveMaxTurns(t *testing.T) {
 	}
 	turns[agent.DefaultMaxTurns] = stubTurn{result: &provider.TurnResult{Text: "should not be reached"}}
 	client := &stubProvider{turns: turns}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "use a bounded turn count",
 		"cwd":    t.TempDir(),
 		"config": map[string]any{"max_turns": float64(100001)},
 	}))
 	if err != nil {
-		t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+		t.Fatalf("handleStart() Go error = %v, want nil", err)
 	}
 	if !result.IsError {
-		t.Fatalf("handleDeepseek() result = %#v, want default turn-limit error", result)
+		t.Fatalf("handleStart() result = %#v, want default turn-limit error", result)
 	}
 	want := fmt.Sprintf("turn limit reached (%d)", agent.DefaultMaxTurns)
 	if text := toolResultText(t, result); !strings.Contains(text, want) {
@@ -904,7 +999,7 @@ func TestApproveElicitationActions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, "test")
+			s := New(&stubProvider{}, testProviderConfig(), "test")
 			var result *mcp.ElicitationResult
 			if test.err == nil {
 				result = &mcp.ElicitationResult{
@@ -950,16 +1045,16 @@ func TestApprovalUnavailableDeniesToolCall(t *testing.T) {
 		}}},
 		{result: &provider.TurnResult{Text: "denied safely"}},
 	}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt":          "write a file",
 		"cwd":             cwd,
 		"sandbox":         "read-only",
 		"approval-policy": "on-request",
 	}))
 	if err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want successful denial recovery", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want successful denial recovery", result, err)
 	}
 	if got := toolResultText(t, result); got != "denied safely" {
 		t.Fatalf("result text = %q, want %q", got, "denied safely")
@@ -979,7 +1074,7 @@ func TestApprovalUnavailableDeniesToolCall(t *testing.T) {
 }
 
 func TestEmitWithoutClientReturnsPromptly(t *testing.T) {
-	s := New(&stubProvider{}, "test")
+	s := New(&stubProvider{}, testProviderConfig(), "test")
 	done := make(chan struct{})
 	go func() {
 		s.Emit(context.Background(), "thread", map[string]any{"type": "test"})
@@ -993,11 +1088,11 @@ func TestEmitWithoutClientReturnsPromptly(t *testing.T) {
 	}
 }
 
-// runScriptedDeepseekCall drives one real tools/call through the MCP server
+// runScriptedSubagentCall drives one real tools/call through the MCP server
 // with a scripted shell call followed by a two-line completion, and returns the
 // notifications the session received. meta, when non-nil, is sent as the
 // params._meta of the tools/call request.
-func runScriptedDeepseekCall(
+func runScriptedSubagentCall(
 	t *testing.T,
 	s *Server,
 	session *fakeElicitationSession,
@@ -1051,7 +1146,7 @@ func runScriptedDeepseekCall(
 	return notifications
 }
 
-func deepseekEventType(t *testing.T, notification mcp.JSONRPCNotification) string {
+func subagentEventType(t *testing.T, notification mcp.JSONRPCNotification) string {
 	t.Helper()
 	msg, ok := notification.Params.AdditionalFields["msg"].(map[string]any)
 	if !ok {
@@ -1070,10 +1165,10 @@ func TestProgressNotificationsWithToken(t *testing.T) {
 		}}},
 		{result: &provider.TurnResult{Text: "line one\nline two"}},
 	}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
 
-	notifications := runScriptedDeepseekCall(t, s, session, map[string]any{"progressToken": "tok-1"})
+	notifications := runScriptedSubagentCall(t, s, session, map[string]any{"progressToken": "tok-1"})
 
 	var progressNotifications []mcp.JSONRPCNotification
 	var eventTypes []string
@@ -1082,7 +1177,7 @@ func TestProgressNotificationsWithToken(t *testing.T) {
 		case "notifications/progress":
 			progressNotifications = append(progressNotifications, notification)
 		case "subagent/event":
-			eventTypes = append(eventTypes, deepseekEventType(t, notification))
+			eventTypes = append(eventTypes, subagentEventType(t, notification))
 		}
 	}
 
@@ -1121,10 +1216,10 @@ func TestNoProgressNotificationsWithoutToken(t *testing.T) {
 		}}},
 		{result: &provider.TurnResult{Text: "line one\nline two"}},
 	}}
-	s := New(client, "test")
+	s := New(client, testProviderConfig(), "test")
 	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
 
-	notifications := runScriptedDeepseekCall(t, s, session, nil)
+	notifications := runScriptedSubagentCall(t, s, session, nil)
 
 	progressCount := 0
 	eventCount := 0
@@ -1162,7 +1257,7 @@ func TestProgressSummaryTruncation(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekValidatesWritableRoots(t *testing.T) {
+func TestHandleStartValidatesWritableRoots(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -1179,46 +1274,46 @@ func TestHandleDeepseekValidatesWritableRoots(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, "test")
-			result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+			s := New(&stubProvider{}, testProviderConfig(), "test")
+			result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 				"prompt": "hello",
 				"cwd":    t.TempDir(),
 				"config": map[string]any{"writable_roots": test.value},
 			}))
 			if err != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "config.writable_roots") {
-				t.Fatalf("handleDeepseek() = (%#v, %v), want config.writable_roots tool error", result, err)
+				t.Fatalf("handleStart() = (%#v, %v), want config.writable_roots tool error", result, err)
 			}
 		})
 	}
 }
 
-func TestHandleDeepseekAcceptsWritableRoots(t *testing.T) {
+func TestHandleStartAcceptsWritableRoots(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "test")
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	s := New(client, testProviderConfig(), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
 		"config": map[string]any{"writable_roots": []any{t.TempDir()}},
 	}))
 	if err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
 	}
 }
 
-func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
+func TestHandleStartWritesSessionMeta(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "9.9.9")
+	s := New(client, testProviderConfig(), "9.9.9")
 
-	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
 		"config": map[string]any{"model_reasoning_effort": "xhigh"},
 	}))
 	if err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v), want success", result, err)
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
 	}
 	threadID := toolResultThreadID(t, result)
 
@@ -1250,17 +1345,17 @@ func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
 	}
 }
 
-func TestHandleDeepseekRolloutOffWritesNothing(t *testing.T) {
+func TestHandleStartRolloutOffWritesNothing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, "test")
-	if result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+	s := New(client, testProviderConfig(), "test")
+	if result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
 	})); err != nil || result.IsError {
-		t.Fatalf("handleDeepseek() = (%#v, %v)", result, err)
+		t.Fatalf("handleStart() = (%#v, %v)", result, err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("sessions dir created with SUBAGENT_MCP_ROLLOUT=off")

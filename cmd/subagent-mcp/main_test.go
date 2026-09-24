@@ -11,45 +11,44 @@ import (
 	"testing"
 )
 
-const mainChild = "SUBAGENT_MCP_MAIN_CHILD"
+const (
+	mainChild  = "SUBAGENT_MCP_MAIN_CHILD"
+	testEnvKey = "SUBAGENT_TEST_API_KEY"
 
-func TestResolveAPIKeyFromEnvironment(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DEEPSEEK_API_KEY", "sk-from-environment")
+	validTestConfig = `
+active_provider = "test"
 
-	key, err := resolveAPIKey()
-	if err != nil {
-		t.Fatalf("resolveAPIKey() error = %v", err)
-	}
-	if key != "sk-from-environment" {
-		t.Fatalf("resolveAPIKey() = %q, want %q", key, "sk-from-environment")
-	}
-}
+[providers.test]
+api = "chat-completions"
+env_key = "SUBAGENT_TEST_API_KEY"
+default_model = "test-model"
+models = [{ id = "test-model" }]
+`
+)
 
-func TestResolveAPIKeyFromAuthFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("DEEPSEEK_API_KEY", "")
-	writeAuthFile(t, home, `{"api_key":"sk-from-file","future_field":"ignored"}`, 0o600)
-
-	key, err := resolveAPIKey()
-	if err != nil {
-		t.Fatalf("resolveAPIKey() error = %v", err)
-	}
-	if key != "sk-from-file" {
-		t.Fatalf("resolveAPIKey() = %q, want %q", key, "sk-from-file")
-	}
-}
-
-func TestMainRequiresDeepSeekAPIKey(t *testing.T) {
+func TestMainMissingConfigFile(t *testing.T) {
 	if runMainChild(t) {
 		return
 	}
 
-	output := runMainExpectingFailure(t, nil)
-	const want = "DEEPSEEK_API_KEY environment variable or ~/.config/ds-mcp/auth.json is required"
-	if !strings.Contains(output, want) {
-		t.Fatalf("main() failure output = %q, want it to contain %q", output, want)
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	output := runMainExpectingFailure(t, "SUBAGENT_MCP_CONFIG="+missing)
+	for _, want := range []string{missing, "config.example.toml"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("main() failure output = %q, want it to contain %q", output, want)
+		}
+	}
+}
+
+func TestMainRequiresActiveProviderKey(t *testing.T) {
+	if runMainChild(t) {
+		return
+	}
+
+	path := writeConfigFile(t, validTestConfig)
+	output := runMainExpectingFailure(t, "SUBAGENT_MCP_CONFIG="+path)
+	if !strings.Contains(output, testEnvKey) {
+		t.Fatalf("main() failure output = %q, want it to name %q", output, testEnvKey)
 	}
 }
 
@@ -63,9 +62,11 @@ func TestMainVersion(t *testing.T) {
 	home := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
 	for _, entry := range os.Environ() {
-		if !hasEnvName(entry, "DEEPSEEK_API_KEY") &&
-			!hasEnvName(entry, "HOME") &&
-			!hasEnvName(entry, mainChild) {
+		if !hasEnvName(entry, "HOME") &&
+			!hasEnvName(entry, mainChild) &&
+			!hasEnvName(entry, "SUBAGENT_MCP_CONFIG") &&
+			!hasEnvName(entry, "SUBAGENT_MCP_TOOL_NAME") &&
+			!hasEnvName(entry, testEnvKey) {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
@@ -87,54 +88,15 @@ func TestMainRejectsInvalidToolName(t *testing.T) {
 		return
 	}
 
-	t.Setenv("SUBAGENT_MCP_TOOL_NAME", "bad name")
-	output := runMainExpectingFailure(t, nil)
+	path := writeConfigFile(t, validTestConfig)
+	output := runMainExpectingFailure(t,
+		"SUBAGENT_MCP_CONFIG="+path,
+		testEnvKey+"=sk-test",
+		"SUBAGENT_MCP_TOOL_NAME=bad name",
+	)
 	if !strings.Contains(output, "SUBAGENT_MCP_TOOL_NAME") {
 		t.Fatalf("main() failure output = %q, want it to mention %q", output, "SUBAGENT_MCP_TOOL_NAME")
 	}
-}
-
-func TestMainRejectsPermissiveAuthFile(t *testing.T) {
-	if runMainChild(t) {
-		return
-	}
-
-	output := runMainExpectingFailure(t, func(home string) {
-		writeAuthFile(t, home, `{"api_key":"sk-from-file"}`, 0o644)
-	})
-	for _, want := range []string{"overly permissive permissions", "mode 644", "chmod 600"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("main() failure output = %q, want it to contain %q", output, want)
-		}
-	}
-}
-
-func TestMainRejectsMalformedAuthFile(t *testing.T) {
-	if runMainChild(t) {
-		return
-	}
-
-	output := runMainExpectingFailure(t, func(home string) {
-		writeAuthFile(t, home, `{"api_key":`, 0o600)
-	})
-	if !strings.Contains(output, "invalid JSON") {
-		t.Fatalf("main() failure output = %q, want it to contain %q", output, "invalid JSON")
-	}
-	assertNotGenericMissingKeyError(t, output)
-}
-
-func TestMainRejectsAuthFileWithoutAPIKey(t *testing.T) {
-	if runMainChild(t) {
-		return
-	}
-
-	output := runMainExpectingFailure(t, func(home string) {
-		writeAuthFile(t, home, `{}`, 0o600)
-	})
-	if !strings.Contains(output, "empty or missing api_key") {
-		t.Fatalf("main() failure output = %q, want it to contain %q", output, "empty or missing api_key")
-	}
-	assertNotGenericMissingKeyError(t, output)
 }
 
 func runMainChild(t *testing.T) bool {
@@ -145,25 +107,25 @@ func runMainChild(t *testing.T) bool {
 	return true
 }
 
-func runMainExpectingFailure(t *testing.T, setup func(home string)) string {
+func runMainExpectingFailure(t *testing.T, extraEnv ...string) string {
 	t.Helper()
 	home := t.TempDir()
-	if setup != nil {
-		setup(home)
-	}
 
 	cmd := exec.Command(os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
 	for _, entry := range os.Environ() {
-		if !hasEnvName(entry, "DEEPSEEK_API_KEY") &&
-			!hasEnvName(entry, "HOME") &&
-			!hasEnvName(entry, mainChild) {
+		if !hasEnvName(entry, "HOME") &&
+			!hasEnvName(entry, mainChild) &&
+			!hasEnvName(entry, "SUBAGENT_MCP_CONFIG") &&
+			!hasEnvName(entry, "SUBAGENT_MCP_TOOL_NAME") &&
+			!hasEnvName(entry, testEnvKey) {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
 	cmd.Env = append(cmd.Env, "HOME="+home, mainChild+"="+t.Name())
+	cmd.Env = append(cmd.Env, extraEnv...)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("main() accepted invalid API key configuration; child output:\n%s", output)
+		t.Fatalf("main() accepted invalid configuration; child output:\n%s", output)
 	}
 
 	var exitErr *exec.ExitError
@@ -173,30 +135,15 @@ func runMainExpectingFailure(t *testing.T, setup func(home string)) string {
 	return string(output)
 }
 
-func writeAuthFile(t *testing.T, home, contents string, mode os.FileMode) string {
+func writeConfigFile(t *testing.T, contents string) string {
 	t.Helper()
-	dir := filepath.Join(home, ".config", "ds-mcp")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("os.MkdirAll() error = %v", err)
-	}
-	path := filepath.Join(dir, "auth.json")
+	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("os.WriteFile() error = %v", err)
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatalf("os.Chmod() error = %v", err)
 	}
 	return path
 }
 
 func hasEnvName(entry, name string) bool {
 	return strings.HasPrefix(entry, name+"=")
-}
-
-func assertNotGenericMissingKeyError(t *testing.T, output string) {
-	t.Helper()
-	const generic = "environment variable or ~/.config/ds-mcp/auth.json is required"
-	if strings.Contains(output, generic) {
-		t.Fatalf("main() failure output = %q, do not want generic missing-key error", output)
-	}
 }

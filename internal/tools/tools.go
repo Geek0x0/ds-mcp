@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -114,14 +115,57 @@ func runCommand(ctx context.Context, cwd string, argv []string, timeout time.Dur
 	return out, -1, runErr
 }
 
-// scrubbedEnv returns the current environment without DEEPSEEK_ variables so
-// that commands run by the agent cannot read the API key from the server's
-// environment.
+var (
+	scrubMu       sync.RWMutex
+	scrubNames    = map[string]bool{}
+	scrubPrefixes = []string{"SUBAGENT_MCP_"}
+	protected     []string
+)
+
+// SetScrubbedEnv sets which environment variables are removed from every shell
+// child: exact names plus every name starting with one of the prefixes.
+func SetScrubbedEnv(names, prefixes []string) {
+	scrubMu.Lock()
+	defer scrubMu.Unlock()
+	scrubNames = make(map[string]bool, len(names))
+	for _, name := range names {
+		scrubNames[name] = true
+	}
+	scrubPrefixes = append([]string(nil), prefixes...)
+}
+
+// SetProtectedFiles sets the files read_file refuses to read, compared after
+// resolving symlinks.
+func SetProtectedFiles(paths []string) {
+	scrubMu.Lock()
+	defer scrubMu.Unlock()
+	protected = protected[:0]
+	for _, path := range paths {
+		protected = append(protected, resolveForComparison(path))
+	}
+}
+
+// scrubbedEnv returns the current environment without the configured secret
+// names and prefixes so that commands run by the agent cannot read provider
+// API keys from the server's environment.
 func scrubbedEnv() []string {
+	scrubMu.RLock()
+	defer scrubMu.RUnlock()
 	env := os.Environ()
 	scrubbed := make([]string, 0, len(env))
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "DEEPSEEK_") {
+		name, _, _ := strings.Cut(entry, "=")
+		if scrubNames[name] {
+			continue
+		}
+		strip := false
+		for _, prefix := range scrubPrefixes {
+			if strings.HasPrefix(name, prefix) {
+				strip = true
+				break
+			}
+		}
+		if strip {
 			continue
 		}
 		scrubbed = append(scrubbed, entry)
@@ -140,8 +184,8 @@ func ReadFile(ctx context.Context, cwd, path string) (string, error) {
 // and a non-positive limit means no line limit. Continuation markers in the
 // result tell the caller which line to request next.
 func ReadFileRange(ctx context.Context, cwd, path string, offset, limit int) (string, error) {
-	if isCredentialFile(cwd, path) {
-		return "", fmt.Errorf("refusing to read the ds-mcp credential file: %s", resolvePath(cwd, path))
+	if isProtectedFile(cwd, path) {
+		return "", fmt.Errorf("refusing to read a protected subagent-mcp file: %s", resolvePath(cwd, path))
 	}
 	if offset < 1 {
 		offset = 1
@@ -282,22 +326,16 @@ func readFileRange(file *os.File, offset, limit int) (string, error) {
 	}
 }
 
-// credentialFile returns the path of the ds-mcp credential file, or "" when
-// the user home directory cannot be resolved.
-func credentialFile() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+func isProtectedFile(cwd, path string) bool {
+	resolved := resolveForComparison(resolvePath(cwd, path))
+	scrubMu.RLock()
+	defer scrubMu.RUnlock()
+	for _, candidate := range protected {
+		if resolved == candidate {
+			return true
+		}
 	}
-	return filepath.Join(home, ".config", "ds-mcp", "auth.json")
-}
-
-func isCredentialFile(cwd, path string) bool {
-	credential := credentialFile()
-	if credential == "" {
-		return false
-	}
-	return resolveForComparison(resolvePath(cwd, path)) == resolveForComparison(credential)
+	return false
 }
 
 // resolveForComparison follows symlinks when possible so that a link pointing

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Geek0x0/subagent-mcp/internal/agent"
+	"github.com/Geek0x0/subagent-mcp/internal/config"
 	"github.com/Geek0x0/subagent-mcp/internal/policy"
 	"github.com/Geek0x0/subagent-mcp/internal/provider"
 	"github.com/Geek0x0/subagent-mcp/internal/repo"
@@ -100,43 +101,53 @@ func requestIDFromMeta(req mcp.CallToolRequest) (string, bool) {
 	return key, true
 }
 
-var reasoningEfforts = map[string]string{
-	"low":    "low",
-	"medium": "high",
-	"high":   "high",
-	"xhigh":  "max",
-	"max":    "max",
+// effortValuesText lists the accepted reasoning effort values for error messages.
+func effortValuesText() string {
+	return strings.Join(config.EffortValues, ", ")
 }
 
-const reasoningEffortValues = "low, medium, high, xhigh, max"
-
-// resolveReasoningEffort returns the requested effort value and the value sent
-// to the API. The top-level argument wins over config.model_reasoning_effort.
-func resolveReasoningEffort(arguments map[string]any, config map[string]any) (string, string, error) {
+// resolveEffort returns the requested effort value. The top-level argument wins
+// over config.model_reasoning_effort; each source is validated against the
+// accepted effort values.
+func resolveEffort(arguments map[string]any, configMap map[string]any) (string, error) {
 	requested := "high"
-	if raw, present := config["model_reasoning_effort"]; present {
+	if raw, present := configMap["model_reasoning_effort"]; present {
 		value, ok := raw.(string)
 		if !ok {
-			return "", "", fmt.Errorf("config.model_reasoning_effort must be a string; valid values: %s", reasoningEffortValues)
+			return "", fmt.Errorf("config.model_reasoning_effort must be a string; valid values: %s", effortValuesText())
 		}
-		if _, known := reasoningEfforts[value]; !known {
-			return "", "", fmt.Errorf("invalid config.model_reasoning_effort %q; valid values: %s", value, reasoningEffortValues)
+		if !config.ValidEffort(value) {
+			return "", fmt.Errorf("invalid config.model_reasoning_effort %q; valid values: %s", value, effortValuesText())
 		}
 		requested = value
 	}
 	if raw, present := arguments["reasoning-effort"]; present {
 		value, ok := raw.(string)
 		if !ok {
-			return "", "", fmt.Errorf("reasoning-effort must be a string; valid values: %s", reasoningEffortValues)
+			return "", fmt.Errorf("reasoning-effort must be a string; valid values: %s", effortValuesText())
 		}
 		if value != "" {
-			if _, known := reasoningEfforts[value]; !known {
-				return "", "", fmt.Errorf("invalid reasoning-effort %q; valid values: %s", value, reasoningEffortValues)
+			if !config.ValidEffort(value) {
+				return "", fmt.Errorf("invalid reasoning-effort %q; valid values: %s", value, effortValuesText())
 			}
 			requested = value
 		}
 	}
-	return requested, reasoningEfforts[requested], nil
+	return requested, nil
+}
+
+// modelDescription describes the active provider's models for the model
+// parameter of the start tool.
+func modelDescription(cfg config.Provider) string {
+	models := make([]string, 0, len(cfg.Models))
+	for _, model := range cfg.Models {
+		if model.Description == "" {
+			models = append(models, model.ID)
+			continue
+		}
+		models = append(models, fmt.Sprintf("%s (%s)", model.ID, model.Description))
+	}
+	return fmt.Sprintf("Model to use; default: %s. Available: %s", cfg.DefaultModel, strings.Join(models, ", "))
 }
 
 func parseWritableRoots(config map[string]any) ([]string, error) {
@@ -170,6 +181,7 @@ type Server struct {
 	version      string
 	providerName string
 	toolName     string
+	cfg          config.Provider
 
 	callsMu sync.Mutex
 	calls   map[string]context.CancelFunc
@@ -208,12 +220,15 @@ func ValidateToolName(name string) error {
 	return nil
 }
 
-func New(p provider.Provider, version string, opts ...Option) *Server {
+// New builds a Server for the active provider. cfg is the active provider's
+// config entry and drives the model enum, the default model, and effort mapping.
+func New(p provider.Provider, cfg config.Provider, version string, opts ...Option) *Server {
 	s := &Server{
 		mgr:          agent.NewManager(),
 		version:      version,
 		providerName: p.Name(),
 		toolName:     defaultToolName,
+		cfg:          cfg,
 		calls:        make(map[string]context.CancelFunc),
 	}
 	for _, opt := range opts {
@@ -242,7 +257,7 @@ func New(p provider.Provider, version string, opts ...Option) *Server {
 	)
 	s.mcp.AddNotificationHandler(cancelledNotificationMethod, s.handleCancelledNotification)
 	s.runner = &agent.Runner{Provider: p, Emitter: s, Approver: s}
-	s.mcp.AddTool(deepseekTool(s.toolName), s.handleDeepseek)
+	s.mcp.AddTool(startTool(s.toolName, cfg), s.handleStart)
 	s.mcp.AddTool(replyTool(s.toolName), s.handleReply)
 	return s
 }
@@ -299,22 +314,23 @@ func (s *Server) handleCancelledNotification(_ context.Context, notification mcp
 }
 
 type toolOutput struct {
-	ThreadID string `json:"threadId" jsonschema_description:"ID of the DeepSeek agent thread that produced this result."`
-	Content  string `json:"content" jsonschema_description:"Human-readable report text from the DeepSeek agent."`
+	ThreadID string `json:"threadId" jsonschema_description:"ID of the subagent thread that produced this result."`
+	Content  string `json:"content" jsonschema_description:"Human-readable report text from the subagent."`
 }
 
-func deepseekTool(name string) mcp.Tool {
+func startTool(name string, cfg config.Provider) mcp.Tool {
 	return mcp.NewTool(
 		name,
 		mcp.WithDescription("Start a new subagent coding-agent thread."),
 		mcp.WithString(
 			"prompt",
 			mcp.Required(),
-			mcp.Description("Task prompt to send to the new DeepSeek agent thread."),
+			mcp.Description("Task prompt to send to the new subagent thread."),
 		),
 		mcp.WithString(
 			"model",
-			mcp.Description("DeepSeek model name; defaults to deepseek-v4-pro."),
+			mcp.Enum(cfg.ModelIDs()...),
+			mcp.Description(modelDescription(cfg)),
 		),
 		mcp.WithString(
 			"cwd",
@@ -330,7 +346,8 @@ func deepseekTool(name string) mcp.Tool {
 		),
 		mcp.WithString(
 			"reasoning-effort",
-			mcp.Description("Reasoning effort for DeepSeek's thinking mode: low, medium, high, xhigh, or max (medium maps to high, xhigh maps to max); defaults to high, or to config.model_reasoning_effort when set."),
+			mcp.Enum(config.EffortValues...),
+			mcp.Description("Reasoning effort: none, minimal, low, medium, high, xhigh, or max; defaults to high, or to config.model_reasoning_effort."),
 		),
 		mcp.WithString(
 			"base-instructions",
@@ -360,13 +377,13 @@ func replyTool(baseName string) mcp.Tool {
 		mcp.WithString(
 			"prompt",
 			mcp.Required(),
-			mcp.Description("Follow-up prompt to send to the existing DeepSeek agent thread."),
+			mcp.Description("Follow-up prompt to send to the existing subagent thread."),
 		),
 		mcp.WithOutputSchema[toolOutput](),
 	)
 }
 
-func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ctx, endCall := s.beginCall(ctx, req)
 	defer endCall()
 
@@ -394,8 +411,19 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		)), nil
 	}
 
-	config, _ := arguments["config"].(map[string]any)
-	requested, normalized, err := resolveReasoningEffort(arguments, config)
+	model := req.GetString("model", "")
+	if model == "" {
+		model = s.cfg.DefaultModel
+	} else if !s.cfg.HasModel(model) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"unknown model %q; available models: %s",
+			model,
+			strings.Join(s.cfg.ModelIDs(), ", "),
+		)), nil
+	}
+
+	looseConfig, _ := arguments["config"].(map[string]any)
+	requested, err := resolveEffort(arguments, looseConfig)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -444,22 +472,22 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	maxTurns := 0
-	if value, ok := config["max_turns"].(float64); ok && value > 0 && value <= maxConfiguredTurns {
+	if value, ok := looseConfig["max_turns"].(float64); ok && value > 0 && value <= maxConfiguredTurns {
 		maxTurns = int(value)
 	}
 
-	writableRoots, err := parseWritableRoots(config)
+	writableRoots, err := parseWritableRoots(looseConfig)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	sess := s.mgr.Create(agent.Options{
-		Model:           req.GetString("model", ""),
+		Model:           model,
 		Cwd:             cwd,
 		Sandbox:         sandbox,
 		Approval:        approval,
 		ReasoningEffort: requested,
-		EffortSent:      normalized,
+		EffortSent:      s.cfg.MapEffort(requested),
 		SystemPrompt:    systemPrompt,
 		MaxTurns:        maxTurns,
 		WritableRoots:   writableRoots,

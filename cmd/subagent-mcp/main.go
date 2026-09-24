@@ -1,18 +1,17 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/Geek0x0/subagent-mcp/internal/config"
-	"github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
+	"github.com/Geek0x0/subagent-mcp/internal/provider"
+	_ "github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
 	dsserver "github.com/Geek0x0/subagent-mcp/internal/server"
+	"github.com/Geek0x0/subagent-mcp/internal/tools"
 )
 
 const version = "0.5.0"
@@ -26,6 +25,26 @@ func main() {
 		return
 	}
 
+	path, err := config.DefaultPath()
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	key, err := cfg.APIKey()
+	if err != nil {
+		log.Fatal(err)
+	}
+	name, active := cfg.Active()
+	p, err := provider.New(name, active, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tools.SetScrubbedEnv(cfg.EnvKeys(), []string{"SUBAGENT_MCP_"})
+	tools.SetProtectedFiles([]string{cfg.Path})
+
 	var options []dsserver.Option
 	if toolName := os.Getenv("SUBAGENT_MCP_TOOL_NAME"); toolName != "" {
 		if err := dsserver.ValidateToolName(toolName); err != nil {
@@ -34,61 +53,7 @@ func main() {
 		options = append(options, dsserver.WithToolName(toolName))
 	}
 
-	key, err := resolveAPIKey()
-	if err != nil {
-		log.Fatal(err)
-	}
-	baseURL := os.Getenv("DEEPSEEK_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://api.deepseek.com"
-	}
-	p, err := chatcompletions.New("deepseek", config.Provider{API: config.APIChatCompletions, BaseURL: baseURL}, key)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := dsserver.New(p, version, options...).ServeStdio(); err != nil {
+	if err := dsserver.New(p, active, version, options...).ServeStdio(); err != nil {
 		log.Fatal(err)
 	}
 }
-
-func resolveAPIKey() (string, error) {
-	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
-		return key, nil
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home directory for ~/.config/ds-mcp/auth.json: %w", err)
-	}
-	path := filepath.Join(home, ".config", "ds-mcp", "auth.json")
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", errAPIKeyRequired
-		}
-		return "", fmt.Errorf("stat %s: %w", path, err)
-	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return "", fmt.Errorf("%s has overly permissive permissions (mode %o); run 'chmod 600 %s' and try again", path, mode, path)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", errAPIKeyRequired
-		}
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	var auth struct {
-		APIKey string `json:"api_key"`
-	}
-	if err := json.Unmarshal(data, &auth); err != nil {
-		return "", fmt.Errorf("%s contains invalid JSON: %w", path, err)
-	}
-	if auth.APIKey == "" {
-		return "", fmt.Errorf("%s has an empty or missing api_key field", path)
-	}
-	return auth.APIKey, nil
-}
-
-var errAPIKeyRequired = errors.New("DEEPSEEK_API_KEY environment variable or ~/.config/ds-mcp/auth.json is required")

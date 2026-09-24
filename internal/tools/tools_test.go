@@ -192,53 +192,29 @@ func readPIDFile(t *testing.T, path string) int {
 	return pid
 }
 
-func TestRunShellScrubsDeepSeekEnv(t *testing.T) {
-	t.Setenv("DEEPSEEK_API_KEY", "sk-test-secret")
-	t.Setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
-	t.Setenv("SUBAGENT_MCP_KEEP_ME", "kept")
-
-	out, exitCode, err := RunShell(context.Background(), t.TempDir(), "env", 5*time.Second)
-	if err != nil {
-		t.Fatalf("RunShell() error = %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("RunShell() exitCode = %d, want 0", exitCode)
-	}
-	if strings.Contains(out, "sk-test-secret") {
-		t.Errorf("RunShell() output leaked DEEPSEEK_API_KEY value: %q", out)
-	}
-	if strings.Contains(out, "DEEPSEEK_") {
-		t.Errorf("RunShell() output contains a DEEPSEEK_ variable: %q", out)
-	}
-	if !strings.Contains(out, "SUBAGENT_MCP_KEEP_ME=kept") {
-		t.Errorf("RunShell() output does not contain SUBAGENT_MCP_KEEP_ME=kept: %q", out)
+func TestScrubbedEnvConfigurable(t *testing.T) {
+	t.Cleanup(func() { SetScrubbedEnv(nil, []string{"SUBAGENT_MCP_"}) })
+	SetScrubbedEnv([]string{"MY_PROVIDER_KEY"}, []string{"SUBAGENT_MCP_"})
+	t.Setenv("MY_PROVIDER_KEY", "secret-1")
+	t.Setenv("SUBAGENT_MCP_CONFIG", "/x")
+	t.Setenv("KEEP_ME", "kept")
+	out, _, err := RunShell(context.Background(), t.TempDir(), "env", 5*time.Second)
+	if err != nil || strings.Contains(out, "secret-1") || strings.Contains(out, "SUBAGENT_MCP_CONFIG") || !strings.Contains(out, "KEEP_ME=kept") {
+		t.Fatalf("env output = %q, err = %v", out, err)
 	}
 }
 
-func TestRunShellSandboxedScrubsDeepSeekEnv(t *testing.T) {
+func TestScrubbedEnvSandboxed(t *testing.T) {
 	if err := sandbox.Available(); err != nil {
 		t.Skipf("landlock unavailable: %v", err)
 	}
-	t.Setenv("DEEPSEEK_API_KEY", "sk-test-secret")
-	t.Setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
-	t.Setenv("SUBAGENT_MCP_KEEP_ME", "kept")
-
+	t.Cleanup(func() { SetScrubbedEnv(nil, []string{"SUBAGENT_MCP_"}) })
+	SetScrubbedEnv([]string{"MY_PROVIDER_KEY"}, []string{"SUBAGENT_MCP_"})
+	t.Setenv("MY_PROVIDER_KEY", "secret-2")
 	cwd := t.TempDir()
-	out, exitCode, err := RunShellSandboxed(context.Background(), cwd, "env", 5*time.Second, []string{cwd})
-	if err != nil {
-		t.Fatalf("RunShellSandboxed() error = %v", err)
-	}
-	if exitCode != 0 {
-		t.Fatalf("RunShellSandboxed() exitCode = %d, want 0", exitCode)
-	}
-	if strings.Contains(out, "sk-test-secret") {
-		t.Errorf("RunShellSandboxed() output leaked DEEPSEEK_API_KEY value: %q", out)
-	}
-	if strings.Contains(out, "DEEPSEEK_") {
-		t.Errorf("RunShellSandboxed() output contains a DEEPSEEK_ variable: %q", out)
-	}
-	if !strings.Contains(out, "SUBAGENT_MCP_KEEP_ME=kept") {
-		t.Errorf("RunShellSandboxed() output does not contain SUBAGENT_MCP_KEEP_ME=kept: %q", out)
+	out, _, err := RunShellSandboxed(context.Background(), cwd, "env", 5*time.Second, []string{cwd})
+	if err != nil || strings.Contains(out, "secret-2") {
+		t.Fatalf("env output = %q, err = %v", out, err)
 	}
 }
 
@@ -467,43 +443,29 @@ func TestReadFileRangeSingleHugeLine(t *testing.T) {
 	}
 }
 
-func TestReadFileRefusesCredentialFile(t *testing.T) {
-	const refusal = "refusing to read the ds-mcp credential file"
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	configDir := filepath.Join(home, ".config", "ds-mcp")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll(%q): %v", configDir, err)
+func TestReadFileRefusesProtectedFiles(t *testing.T) {
+	dir := t.TempDir()
+	protected := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(protected, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	credentialPath := filepath.Join(configDir, "auth.json")
-	if err := os.WriteFile(credentialPath, []byte(`{"api_key":"sk-test-secret"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(%q): %v", credentialPath, err)
+	t.Cleanup(func() { SetProtectedFiles(nil) })
+	SetProtectedFiles([]string{protected})
+	link := filepath.Join(t.TempDir(), "link.toml")
+	if err := os.Symlink(protected, link); err != nil {
+		t.Fatal(err)
 	}
-
-	if _, err := ReadFile(context.Background(), t.TempDir(), credentialPath); err == nil || !strings.Contains(err.Error(), refusal) {
-		t.Fatalf("ReadFile() error = %v, want error containing %q", err, refusal)
+	for _, path := range []string{protected, link} {
+		if _, err := ReadFile(context.Background(), dir, path); err == nil || !strings.Contains(err.Error(), "refusing to read") {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
 	}
-
-	linkDir := t.TempDir()
-	if err := os.Symlink(credentialPath, filepath.Join(linkDir, "link.json")); err != nil {
-		t.Skipf("cannot create symlink: %v", err)
+	other := filepath.Join(dir, "other.txt")
+	if err := os.WriteFile(other, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := ReadFile(context.Background(), linkDir, "link.json"); err == nil || !strings.Contains(err.Error(), refusal) {
-		t.Fatalf("ReadFile() symlink error = %v, want error containing %q", err, refusal)
-	}
-
-	otherPath := filepath.Join(configDir, "notes.txt")
-	if err := os.WriteFile(otherPath, []byte("ok"), 0o600); err != nil {
-		t.Fatalf("WriteFile(%q): %v", otherPath, err)
-	}
-	got, err := ReadFile(context.Background(), home, filepath.Join(".config", "ds-mcp", "notes.txt"))
-	if err != nil {
-		t.Fatalf("ReadFile() unrelated file error = %v", err)
-	}
-	if got != "ok" {
-		t.Errorf("ReadFile() unrelated file = %q, want %q", got, "ok")
+	if got, err := ReadFile(context.Background(), dir, other); err != nil || got != "ok" {
+		t.Fatalf("unrelated file = %q, %v", got, err)
 	}
 }
 

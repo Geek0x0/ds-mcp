@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/deepseek"
-	"github.com/Geek0x0/ds-mcp/internal/rollout"
+	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/rollout"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -54,7 +54,7 @@ func lineKinds(lines []rolloutLine) []string {
 
 func TestRunnerWritesRollout(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	t.Setenv("DS_MCP_ROLLOUT", "")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 
 	shell := toolCall("call-shell", "shell", `{"command":"echo hi"}`)
 	patchArgs, _ := json.Marshal(map[string]string{"patch": "*** Begin Patch\n*** Add File: n.txt\n+x\n*** End Patch"})
@@ -121,7 +121,7 @@ func TestRunnerWritesRollout(t *testing.T) {
 
 func TestRunnerRolloutRecordsError(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	t.Setenv("DS_MCP_ROLLOUT", "")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	client := &stubClient{}
 	session := newTestSession(t, Options{})
 	recorder := rollout.Open(session.ID, time.Now())

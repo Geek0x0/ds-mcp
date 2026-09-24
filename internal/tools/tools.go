@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/sandbox"
+	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
 )
 
 const MaxOutputBytes = 16 * 1024

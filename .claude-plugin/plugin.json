@@ -1,7 +1,7 @@
 {
-  "name": "deepseek",
+  "name": "subagent",
   "version": "0.5.0",
-  "description": "DeepSeek-powered coding agent exposed as MCP tools (deepseek / deepseek-reply)",
+  "description": "subagent-mcp coding agent exposed as MCP tools (subagent / subagent-reply)",
   "author": {
     "name": "Kaidi Shi"
   }

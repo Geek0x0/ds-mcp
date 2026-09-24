@@ -9,9 +9,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Geek0x0/ds-mcp/internal/deepseek"
-	"github.com/Geek0x0/ds-mcp/internal/sandbox"
-	dsserver "github.com/Geek0x0/ds-mcp/internal/server"
+	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
+	dsserver "github.com/Geek0x0/subagent-mcp/internal/server"
 )
 
 const version = "0.5.0"
@@ -21,12 +21,12 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
-		fmt.Printf("ds-mcp %s\n", version)
+		fmt.Printf("subagent-mcp %s\n", version)
 		return
 	}
 
 	var options []dsserver.Option
-	if toolName := os.Getenv("DS_MCP_TOOL_NAME"); toolName != "" {
+	if toolName := os.Getenv("SUBAGENT_MCP_TOOL_NAME"); toolName != "" {
 		if err := dsserver.ValidateToolName(toolName); err != nil {
 			log.Fatal(err)
 		}

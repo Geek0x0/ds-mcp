@@ -18,9 +18,9 @@ type Recorder struct {
 }
 
 // Open creates the rollout file for threadID. It returns nil when
-// DS_MCP_ROLLOUT=off or when the file cannot be created (the error is logged).
+// SUBAGENT_MCP_ROLLOUT=off or when the file cannot be created (the error is logged).
 func Open(threadID string, created time.Time) *Recorder {
-	if os.Getenv("DS_MCP_ROLLOUT") == "off" {
+	if os.Getenv("SUBAGENT_MCP_ROLLOUT") == "off" {
 		return nil
 	}
 	home := os.Getenv("CODEX_HOME")

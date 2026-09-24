@@ -1,13 +1,13 @@
 {
-  "name": "ds-mcp",
+  "name": "subagent-mcp",
   "owner": {
     "name": "Kaidi Shi"
   },
   "plugins": [
     {
-      "name": "deepseek",
+      "name": "subagent",
       "source": "./",
-      "description": "DeepSeek-powered coding agent exposed as MCP tools (deepseek / deepseek-reply)"
+      "description": "subagent-mcp coding agent exposed as MCP tools (subagent / subagent-reply)"
     }
   ]
 }

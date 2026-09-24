@@ -1,14 +1,14 @@
 ---
-description: Verify the ds-mcp installation (binary on PATH, credentials configured via DEEPSEEK_API_KEY or auth.json)
+description: Verify the subagent-mcp installation (binary on PATH, credentials configured via DEEPSEEK_API_KEY or auth.json)
 allowed-tools: Bash
 ---
 
-Verify the local ds-mcp installation and print a compact status report.
+Verify the local subagent-mcp installation and print a compact status report.
 
 Run these checks with Bash:
 
-1. `command -v ds-mcp` — locate the binary. If missing, tell the user to run
-   `go install ./cmd/ds-mcp` from the ds-mcp repository root and make sure
+1. `command -v subagent-mcp` — locate the binary. If missing, tell the user to run
+   `go install ./cmd/subagent-mcp` from the subagent-mcp repository root and make sure
    `$(go env GOPATH)/bin` is on PATH.
 2. `test -n "$DEEPSEEK_API_KEY" && echo set || echo missing` — check the
    environment credential.
@@ -29,7 +29,7 @@ Run these checks with Bash:
    `chmod 600 ~/.config/ds-mcp/auth.json` is the standard fix.
 
 Then report:
-- ds-mcp binary: <absolute path, or MISSING with the install hint>
+- subagent-mcp binary: <absolute path, or MISSING with the install hint>
 - DEEPSEEK_API_KEY: <set or not set>
 - auth.json: <MISSING, or present with its mode and secure/insecure status>
 - credentials: <CONFIGURED via DEEPSEEK_API_KEY if set; otherwise CONFIGURED via

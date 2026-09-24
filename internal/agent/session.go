@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/policy"
-	"github.com/Geek0x0/ds-mcp/internal/rollout"
+	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/rollout"
 
 	"github.com/google/uuid"
 	openai "github.com/sashabaranov/go-openai"
@@ -20,7 +20,7 @@ const (
 	maxSessions    = 256
 )
 
-const DefaultSystemPrompt = `You are ds-mcp, a coding agent powered by DeepSeek. You work inside a fixed working directory using four tools:
+const DefaultSystemPrompt = `You are subagent-mcp, a coding agent powered by DeepSeek. You work inside a fixed working directory using four tools:
 
 - shell: run a bash command in the working directory
 - read_file: read a file (relative paths resolve against the working directory)

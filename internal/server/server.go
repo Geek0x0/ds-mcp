@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/agent"
-	"github.com/Geek0x0/ds-mcp/internal/policy"
-	"github.com/Geek0x0/ds-mcp/internal/repo"
-	"github.com/Geek0x0/ds-mcp/internal/rollout"
+	"github.com/Geek0x0/subagent-mcp/internal/agent"
+	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/repo"
+	"github.com/Geek0x0/subagent-mcp/internal/rollout"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -27,11 +27,11 @@ const (
 
 	// defaultToolName is the base name of the two MCP tools when no
 	// WithToolName option is supplied.
-	defaultToolName = "deepseek"
+	defaultToolName = "subagent"
 
 	// requestIDMetaKey is the _meta field the before-call-tool hook uses to hand
 	// the JSON-RPC request ID to the tool handlers, which cannot see it otherwise.
-	requestIDMetaKey = "ds-mcp/requestId"
+	requestIDMetaKey = "subagent-mcp/requestId"
 
 	// cancelledNotificationMethod is the MCP notification clients send when they
 	// abandon an in-flight request, for example when the user presses Esc.
@@ -186,19 +186,19 @@ func WithToolName(name string) Option {
 
 var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// ValidateToolName reports whether name is a valid DS_MCP_TOOL_NAME value. A
+// ValidateToolName reports whether name is a valid SUBAGENT_MCP_TOOL_NAME value. A
 // valid name is 1 to 64 characters from A-Z, a-z, 0-9, '_', and '-', and does
 // not end with "-reply", which would collide with the generated reply tool.
 func ValidateToolName(name string) error {
 	if !toolNamePattern.MatchString(name) {
 		return fmt.Errorf(
-			"DS_MCP_TOOL_NAME %q is invalid: the name must be 1 to 64 characters matching ^[A-Za-z0-9_-]{1,64}$",
+			"SUBAGENT_MCP_TOOL_NAME %q is invalid: the name must be 1 to 64 characters matching ^[A-Za-z0-9_-]{1,64}$",
 			name,
 		)
 	}
 	if strings.HasSuffix(name, "-reply") {
 		return fmt.Errorf(
-			"DS_MCP_TOOL_NAME %q is invalid: the name must not end with \"-reply\" because the reply tool is registered as %s-reply",
+			"SUBAGENT_MCP_TOOL_NAME %q is invalid: the name must not end with \"-reply\" because the reply tool is registered as %s-reply",
 			name,
 			name,
 		)
@@ -231,7 +231,7 @@ func New(client agent.ChatClient, version string, opts ...Option) *Server {
 		request.Params.Meta.AdditionalFields[requestIDMetaKey] = key
 	})
 	s.mcp = mcpserver.NewMCPServer(
-		"ds-mcp",
+		"subagent-mcp",
 		version,
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithRecovery(),
@@ -303,7 +303,7 @@ type toolOutput struct {
 func deepseekTool(name string) mcp.Tool {
 	return mcp.NewTool(
 		name,
-		mcp.WithDescription("Start a new DeepSeek coding-agent thread."),
+		mcp.WithDescription("Start a new subagent coding-agent thread."),
 		mcp.WithString(
 			"prompt",
 			mcp.Required(),
@@ -315,7 +315,7 @@ func deepseekTool(name string) mcp.Tool {
 		),
 		mcp.WithString(
 			"cwd",
-			mcp.Description("Absolute path to an existing working directory; defaults to the ds-mcp process working directory."),
+			mcp.Description("Absolute path to an existing working directory; defaults to the subagent-mcp process working directory."),
 		),
 		mcp.WithString(
 			"sandbox",
@@ -348,7 +348,7 @@ func deepseekTool(name string) mcp.Tool {
 func replyTool(baseName string) mcp.Tool {
 	return mcp.NewTool(
 		baseName+"-reply",
-		mcp.WithDescription("Continue an existing DeepSeek coding-agent thread."),
+		mcp.WithDescription("Continue an existing subagent coding-agent thread."),
 		mcp.WithString(
 			"threadId",
 			mcp.Required(),
@@ -469,7 +469,7 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 		"id":                sess.ID,
 		"timestamp":         created.UTC().Format(time.RFC3339Nano),
 		"cwd":               cwd,
-		"originator":        "ds-mcp",
+		"originator":        "subagent-mcp",
 		"cli_version":       s.version,
 		"source":            "mcp",
 		"model_provider":    "deepseek",
@@ -530,11 +530,11 @@ func resultWithThreadID(threadID, text string, err error) *mcp.CallToolResult {
 }
 
 func (s *Server) Emit(ctx context.Context, threadID string, msg map[string]any) {
-	if err := s.mcp.SendNotificationToClient(ctx, "deepseek/event", map[string]any{
+	if err := s.mcp.SendNotificationToClient(ctx, "subagent/event", map[string]any{
 		"threadId": threadID,
 		"msg":      msg,
 	}); err != nil {
-		log.Printf("deepseek/event emit failed: %v", err)
+		log.Printf("subagent/event emit failed: %v", err)
 	}
 
 	state, ok := ctx.Value(progressContextKey{}).(*progressState)
@@ -608,7 +608,7 @@ func (s *Server) Approve(ctx context.Context, threadID string, req agent.Approva
 	result, err := s.mcp.RequestElicitation(ctx, mcp.ElicitationRequest{
 		Params: mcp.ElicitationParams{
 			Message: fmt.Sprintf(
-				"ds-mcp approval request (thread %s)\ntool: %s\ntarget: %s\nreason: %s",
+				"subagent-mcp approval request (thread %s)\ntool: %s\ntarget: %s\nreason: %s",
 				threadID,
 				req.Tool,
 				target,

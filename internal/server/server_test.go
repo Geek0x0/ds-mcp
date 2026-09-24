@@ -16,8 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Geek0x0/ds-mcp/internal/agent"
-	"github.com/Geek0x0/ds-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/agent"
+	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -130,8 +130,8 @@ func TestToolDeclarations(t *testing.T) {
 		required   []string
 	}{
 		{
-			name: "deepseek",
-			tool: deepseekTool("deepseek"),
+			name: "subagent",
+			tool: deepseekTool("subagent"),
 			properties: []string{
 				"approval-policy",
 				"base-instructions",
@@ -146,8 +146,8 @@ func TestToolDeclarations(t *testing.T) {
 			required: []string{"prompt"},
 		},
 		{
-			name:       "deepseek-reply",
-			tool:       replyTool("deepseek"),
+			name:       "subagent-reply",
+			tool:       replyTool("subagent"),
 			properties: []string{"prompt", "threadId"},
 			required:   []string{"prompt", "threadId"},
 		},
@@ -307,8 +307,8 @@ func TestValidateToolName(t *testing.T) {
 			if err == nil {
 				t.Fatalf("ValidateToolName(%q) error = nil, want error", test.name)
 			}
-			if !strings.Contains(err.Error(), "DS_MCP_TOOL_NAME") {
-				t.Fatalf("ValidateToolName(%q) error = %q, want it to mention %q", test.name, err, "DS_MCP_TOOL_NAME")
+			if !strings.Contains(err.Error(), "SUBAGENT_MCP_TOOL_NAME") {
+				t.Fatalf("ValidateToolName(%q) error = %q, want it to mention %q", test.name, err, "SUBAGENT_MCP_TOOL_NAME")
 			}
 		})
 	}
@@ -319,8 +319,8 @@ func TestToolOutputSchemas(t *testing.T) {
 		name string
 		tool mcp.Tool
 	}{
-		{name: "deepseek", tool: deepseekTool("deepseek")},
-		{name: "deepseek-reply", tool: replyTool("deepseek")},
+		{name: "subagent", tool: deepseekTool("subagent")},
+		{name: "subagent-reply", tool: replyTool("subagent")},
 	}
 
 	for _, test := range tests {
@@ -737,7 +737,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 			s := New(client, "test")
 
 			rawCall := fmt.Sprintf(
-				`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"deepseek","arguments":{"prompt":"hello","cwd":%q,"approval-policy":"never"}}}`,
+				`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"subagent","arguments":{"prompt":"hello","cwd":%q,"approval-policy":"never"}}}`,
 				test.id,
 				t.TempDir(),
 			)
@@ -1005,7 +1005,7 @@ func runScriptedDeepseekCall(
 	t.Helper()
 
 	params := map[string]any{
-		"name": "deepseek",
+		"name": "subagent",
 		"arguments": map[string]any{
 			"prompt":          "hello",
 			"cwd":             t.TempDir(),
@@ -1054,14 +1054,14 @@ func deepseekEventType(t *testing.T, notification mcp.JSONRPCNotification) strin
 	t.Helper()
 	msg, ok := notification.Params.AdditionalFields["msg"].(map[string]any)
 	if !ok {
-		t.Fatalf("deepseek/event msg = %#v, want map[string]any", notification.Params.AdditionalFields["msg"])
+		t.Fatalf("subagent/event msg = %#v, want map[string]any", notification.Params.AdditionalFields["msg"])
 	}
 	eventType, _ := msg["type"].(string)
 	return eventType
 }
 
 func TestProgressNotificationsWithToken(t *testing.T) {
-	t.Setenv("DS_MCP_ROLLOUT", "off")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 
 	client := &stubChatClient{turns: []stubTurn{
 		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{
@@ -1080,14 +1080,14 @@ func TestProgressNotificationsWithToken(t *testing.T) {
 		switch notification.Method {
 		case "notifications/progress":
 			progressNotifications = append(progressNotifications, notification)
-		case "deepseek/event":
+		case "subagent/event":
 			eventTypes = append(eventTypes, deepseekEventType(t, notification))
 		}
 	}
 
 	wantEvents := []string{"task_started", "exec_command_begin", "exec_command_end", "agent_message", "task_complete"}
 	if !reflect.DeepEqual(eventTypes, wantEvents) {
-		t.Fatalf("deepseek/event types = %v, want %v", eventTypes, wantEvents)
+		t.Fatalf("subagent/event types = %v, want %v", eventTypes, wantEvents)
 	}
 
 	wantMessages := []string{"started", "shell: echo hi", "agent: line one", "completed"}
@@ -1112,7 +1112,7 @@ func TestProgressNotificationsWithToken(t *testing.T) {
 }
 
 func TestNoProgressNotificationsWithoutToken(t *testing.T) {
-	t.Setenv("DS_MCP_ROLLOUT", "off")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 
 	client := &stubChatClient{turns: []stubTurn{
 		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{
@@ -1131,7 +1131,7 @@ func TestNoProgressNotificationsWithoutToken(t *testing.T) {
 		switch notification.Method {
 		case "notifications/progress":
 			progressCount++
-		case "deepseek/event":
+		case "subagent/event":
 			eventCount++
 		}
 	}
@@ -1139,7 +1139,7 @@ func TestNoProgressNotificationsWithoutToken(t *testing.T) {
 		t.Fatalf("progress notification count = %d, want 0", progressCount)
 	}
 	if eventCount != 5 {
-		t.Fatalf("deepseek/event count = %d, want 5", eventCount)
+		t.Fatalf("subagent/event count = %d, want 5", eventCount)
 	}
 }
 
@@ -1207,7 +1207,7 @@ func TestHandleDeepseekAcceptsWritableRoots(t *testing.T) {
 func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	t.Setenv("DS_MCP_ROLLOUT", "")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
 	s := New(client, "9.9.9")
 
@@ -1241,7 +1241,7 @@ func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	if meta.Type != "session_meta" || meta.Payload["id"] != threadID || meta.Payload["cli_version"] != "9.9.9" ||
-		meta.Payload["originator"] != "ds-mcp" || meta.Payload["model_provider"] != "deepseek" || meta.Payload["source"] != "mcp" {
+		meta.Payload["originator"] != "subagent-mcp" || meta.Payload["model_provider"] != "deepseek" || meta.Payload["source"] != "mcp" {
 		t.Fatalf("session_meta = %#v", meta)
 	}
 	if turn.Type != "turn_context" || turn.Payload["effort"] != "xhigh" {
@@ -1252,7 +1252,7 @@ func TestHandleDeepseekWritesSessionMeta(t *testing.T) {
 func TestHandleDeepseekRolloutOffWritesNothing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	t.Setenv("DS_MCP_ROLLOUT", "off")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
 	s := New(client, "test")
 	if result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
@@ -1262,7 +1262,7 @@ func TestHandleDeepseekRolloutOffWritesNothing(t *testing.T) {
 		t.Fatalf("handleDeepseek() = (%#v, %v)", result, err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "sessions")); !os.IsNotExist(err) {
-		t.Fatalf("sessions dir created with DS_MCP_ROLLOUT=off")
+		t.Fatalf("sessions dir created with SUBAGENT_MCP_ROLLOUT=off")
 	}
 }
 

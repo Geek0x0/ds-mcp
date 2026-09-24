@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/deepseek"
-	"github.com/Geek0x0/ds-mcp/internal/patch"
+	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/patch"
 
 	openai "github.com/sashabaranov/go-openai"
 )

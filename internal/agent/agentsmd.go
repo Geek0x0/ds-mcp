@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Geek0x0/ds-mcp/internal/repo"
+	"github.com/Geek0x0/subagent-mcp/internal/repo"
 )
 
 const agentsMDMaxBytes = 32 * 1024

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/sandbox"
+	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
 )
 
 func TestRunShell(t *testing.T) {
@@ -195,7 +195,7 @@ func readPIDFile(t *testing.T, path string) int {
 func TestRunShellScrubsDeepSeekEnv(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-test-secret")
 	t.Setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
-	t.Setenv("DS_MCP_KEEP_ME", "kept")
+	t.Setenv("SUBAGENT_MCP_KEEP_ME", "kept")
 
 	out, exitCode, err := RunShell(context.Background(), t.TempDir(), "env", 5*time.Second)
 	if err != nil {
@@ -210,8 +210,8 @@ func TestRunShellScrubsDeepSeekEnv(t *testing.T) {
 	if strings.Contains(out, "DEEPSEEK_") {
 		t.Errorf("RunShell() output contains a DEEPSEEK_ variable: %q", out)
 	}
-	if !strings.Contains(out, "DS_MCP_KEEP_ME=kept") {
-		t.Errorf("RunShell() output does not contain DS_MCP_KEEP_ME=kept: %q", out)
+	if !strings.Contains(out, "SUBAGENT_MCP_KEEP_ME=kept") {
+		t.Errorf("RunShell() output does not contain SUBAGENT_MCP_KEEP_ME=kept: %q", out)
 	}
 }
 
@@ -221,7 +221,7 @@ func TestRunShellSandboxedScrubsDeepSeekEnv(t *testing.T) {
 	}
 	t.Setenv("DEEPSEEK_API_KEY", "sk-test-secret")
 	t.Setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
-	t.Setenv("DS_MCP_KEEP_ME", "kept")
+	t.Setenv("SUBAGENT_MCP_KEEP_ME", "kept")
 
 	cwd := t.TempDir()
 	out, exitCode, err := RunShellSandboxed(context.Background(), cwd, "env", 5*time.Second, []string{cwd})
@@ -237,8 +237,8 @@ func TestRunShellSandboxedScrubsDeepSeekEnv(t *testing.T) {
 	if strings.Contains(out, "DEEPSEEK_") {
 		t.Errorf("RunShellSandboxed() output contains a DEEPSEEK_ variable: %q", out)
 	}
-	if !strings.Contains(out, "DS_MCP_KEEP_ME=kept") {
-		t.Errorf("RunShellSandboxed() output does not contain DS_MCP_KEEP_ME=kept: %q", out)
+	if !strings.Contains(out, "SUBAGENT_MCP_KEEP_ME=kept") {
+		t.Errorf("RunShellSandboxed() output does not contain SUBAGENT_MCP_KEEP_ME=kept: %q", out)
 	}
 }
 

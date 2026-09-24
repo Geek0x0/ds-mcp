@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const mainChild = "DS_MCP_MAIN_CHILD"
+const mainChild = "SUBAGENT_MCP_MAIN_CHILD"
 
 func TestResolveAPIKeyFromEnvironment(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -77,7 +77,7 @@ func TestMainVersion(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("main() --version error = %v; stderr = %q", err, stderr.String())
 	}
-	if got, want := stdout.String(), "ds-mcp "+version+"\n"; got != want {
+	if got, want := stdout.String(), "subagent-mcp "+version+"\n"; got != want {
 		t.Fatalf("main() --version stdout = %q, want %q", got, want)
 	}
 }
@@ -87,10 +87,10 @@ func TestMainRejectsInvalidToolName(t *testing.T) {
 		return
 	}
 
-	t.Setenv("DS_MCP_TOOL_NAME", "bad name")
+	t.Setenv("SUBAGENT_MCP_TOOL_NAME", "bad name")
 	output := runMainExpectingFailure(t, nil)
-	if !strings.Contains(output, "DS_MCP_TOOL_NAME") {
-		t.Fatalf("main() failure output = %q, want it to mention %q", output, "DS_MCP_TOOL_NAME")
+	if !strings.Contains(output, "SUBAGENT_MCP_TOOL_NAME") {
+		t.Fatalf("main() failure output = %q, want it to mention %q", output, "SUBAGENT_MCP_TOOL_NAME")
 	}
 }
 

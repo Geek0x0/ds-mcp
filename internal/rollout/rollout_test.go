@@ -12,7 +12,7 @@ import (
 func TestOpenLayoutAndWrite(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	t.Setenv("DS_MCP_ROLLOUT", "")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	created := time.Date(2026, 9, 23, 23, 56, 7, 0, time.FixedZone("PDT", -7*3600))
 
 	r := Open("thread-1", created)
@@ -71,7 +71,7 @@ func TestOpenLayoutAndWrite(t *testing.T) {
 
 func TestOpenDisabled(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	t.Setenv("DS_MCP_ROLLOUT", "off")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 	if r := Open("t", time.Now()); r != nil {
 		t.Fatalf("Open() = %#v, want nil", r)
 	}
@@ -83,7 +83,7 @@ func TestOpenUnwritableHomeReturnsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_HOME", file)
-	t.Setenv("DS_MCP_ROLLOUT", "")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	if r := Open("t", time.Now()); r != nil {
 		t.Fatalf("Open() = %#v, want nil", r)
 	}
@@ -101,7 +101,7 @@ func TestNilRecorderIsNoop(t *testing.T) {
 
 func TestWriteFailureDisablesRecorder(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	t.Setenv("DS_MCP_ROLLOUT", "")
+	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	r := Open("t", time.Now())
 	if err := os.Remove(r.Path()); err != nil {
 		t.Fatal(err)

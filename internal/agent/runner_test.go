@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/deepseek"
-	"github.com/Geek0x0/ds-mcp/internal/policy"
-	"github.com/Geek0x0/ds-mcp/internal/sandbox"
+	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/sandbox"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -1027,7 +1027,7 @@ func TestRunnerShellSandboxing(t *testing.T) {
 	t.Run("workspace-write denies writes outside roots", func(t *testing.T) {
 		// t.TempDir() lives under /tmp, which is itself a workspace-write root, so
 		// the target has to sit outside every root.
-		target := filepath.Join("/var/tmp", "ds-mcp-sandbox-outside-"+strconv.Itoa(os.Getpid()))
+		target := filepath.Join("/var/tmp", "subagent-mcp-sandbox-outside-"+strconv.Itoa(os.Getpid()))
 		t.Cleanup(func() { _ = os.Remove(target) })
 		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never"}, &stubApprover{}, "touch "+target)
 		if strings.HasPrefix(result, "exit code: 0") {
@@ -1039,7 +1039,7 @@ func TestRunnerShellSandboxing(t *testing.T) {
 	})
 
 	t.Run("workspace-write allows cwd and /tmp", func(t *testing.T) {
-		tmpFile := filepath.Join("/tmp", "ds-mcp-sandbox-"+strconv.Itoa(os.Getpid()))
+		tmpFile := filepath.Join("/tmp", "subagent-mcp-sandbox-"+strconv.Itoa(os.Getpid()))
 		t.Cleanup(func() { _ = os.Remove(tmpFile) })
 		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never"}, &stubApprover{}, "touch in-cwd && touch "+tmpFile)
 		if !strings.HasPrefix(result, "exit code: 0") {
@@ -1082,7 +1082,7 @@ func TestRunnerShellSandboxing(t *testing.T) {
 		if info, err := os.Stat("/dev/shm"); err != nil || !info.IsDir() {
 			t.Skip("/dev/shm unavailable")
 		}
-		probe := filepath.Join("/dev/shm", "ds-mcp-runner-probe-"+strconv.Itoa(os.Getpid()))
+		probe := filepath.Join("/dev/shm", "subagent-mcp-runner-probe-"+strconv.Itoa(os.Getpid()))
 		t.Cleanup(func() { _ = os.Remove(probe) })
 		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never"}, &stubApprover{},
 			"echo x > /dev/null && touch "+probe)

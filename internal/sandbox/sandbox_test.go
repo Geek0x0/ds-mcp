@@ -16,8 +16,8 @@ func TestMain(m *testing.M) {
 }
 
 func TestCommand(t *testing.T) {
-	got := Command("/bin/ds-mcp", []string{"/a", "/b"}, "bash", "-lc", "echo hi")
-	want := []string{"/bin/ds-mcp", HelperArg, "--rw", "/a", "--rw", "/b", "--", "bash", "-lc", "echo hi"}
+	got := Command("/bin/subagent-mcp", []string{"/a", "/b"}, "bash", "-lc", "echo hi")
+	want := []string{"/bin/subagent-mcp", HelperArg, "--rw", "/a", "--rw", "/b", "--", "bash", "-lc", "echo hi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Command() = %v, want %v", got, want)
 	}
@@ -96,7 +96,7 @@ func TestHelperDeniesDeviceDirectoryWrites(t *testing.T) {
 	if info, err := os.Stat("/dev/shm"); err != nil || !info.IsDir() {
 		t.Skip("/dev/shm unavailable")
 	}
-	probe := filepath.Join("/dev/shm", "ds-mcp-probe-"+filepath.Base(t.TempDir()))
+	probe := filepath.Join("/dev/shm", "subagent-mcp-probe-"+filepath.Base(t.TempDir()))
 	t.Cleanup(func() { _ = os.Remove(probe) })
 
 	out, code := runHelper(t, []string{t.TempDir()}, "touch "+probe)
@@ -112,7 +112,7 @@ func TestHelperBadArgsExit126(t *testing.T) {
 	}
 	out, err := exec.Command(self, HelperArg, "--rw").CombinedOutput()
 	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 126 || !strings.Contains(string(out), "ds-mcp:") {
-		t.Fatalf("helper bad args = (%q, %v), want exit 126 with ds-mcp message", out, err)
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 126 || !strings.Contains(string(out), "subagent-mcp:") {
+		t.Fatalf("helper bad args = (%q, %v), want exit 126 with subagent-mcp message", out, err)
 	}
 }

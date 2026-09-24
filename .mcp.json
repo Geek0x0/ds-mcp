@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "deepseek": {
-      "command": "ds-mcp"
+    "subagent": {
+      "command": "subagent-mcp"
     }
   }
 }

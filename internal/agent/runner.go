@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Geek0x0/ds-mcp/internal/deepseek"
-	"github.com/Geek0x0/ds-mcp/internal/patch"
-	"github.com/Geek0x0/ds-mcp/internal/policy"
-	"github.com/Geek0x0/ds-mcp/internal/tools"
+	"github.com/Geek0x0/subagent-mcp/internal/deepseek"
+	"github.com/Geek0x0/subagent-mcp/internal/patch"
+	"github.com/Geek0x0/subagent-mcp/internal/policy"
+	"github.com/Geek0x0/subagent-mcp/internal/tools"
 
 	"github.com/google/uuid"
 	openai "github.com/sashabaranov/go-openai"

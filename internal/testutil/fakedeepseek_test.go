@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Geek0x0/ds-mcp/internal/testutil"
+	"github.com/Geek0x0/subagent-mcp/internal/testutil"
 )
 
-const ambiguousFakeTurnChild = "DS_MCP_AMBIGUOUS_FAKE_TURN_CHILD"
+const ambiguousFakeTurnChild = "SUBAGENT_MCP_AMBIGUOUS_FAKE_TURN_CHILD"
 
 func TestNewFakeDeepSeekRejectsTextWithToolCalls(t *testing.T) {
 	if os.Getenv(ambiguousFakeTurnChild) == "1" {

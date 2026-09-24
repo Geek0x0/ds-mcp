@@ -1,5 +1,5 @@
 // Package sandbox runs commands under a kernel-enforced write restriction by
-// re-executing the ds-mcp binary in a hidden helper mode.
+// re-executing the subagent-mcp binary in a hidden helper mode.
 package sandbox
 
 import (
@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-// HelperArg is the hidden argv[1] that turns the ds-mcp binary into the sandbox helper.
+// HelperArg is the hidden argv[1] that turns the subagent-mcp binary into the sandbox helper.
 const HelperArg = "__sandbox-exec"
 
 // deviceFiles are always writable under the sandbox; the rest of /dev (including
@@ -33,7 +33,7 @@ func MaybeRunHelper() {
 		return
 	}
 	err := run(os.Args[2:])
-	fmt.Fprintf(os.Stderr, "ds-mcp: %v\n", err)
+	fmt.Fprintf(os.Stderr, "subagent-mcp: %v\n", err)
 	os.Exit(126)
 }
 

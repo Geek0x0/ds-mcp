@@ -77,3 +77,12 @@ type Provider interface {
 	Name() string
 	Turn(ctx context.Context, req TurnRequest, onDelta func(string)) (*TurnResult, error)
 }
+
+// ModelLister is an optional capability a Provider MAY additionally implement.
+// It lists the model ids the provider's API currently reports, for config
+// validation (verifying a base_url/key and model ids are real) rather than for
+// use in a Turn. Callers type-assert a Provider to ModelLister to check whether
+// the capability is available.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]string, error)
+}

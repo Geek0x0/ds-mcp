@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -219,5 +221,39 @@ func TestMessagesMultiDeltaAndEmptyToolInput(t *testing.T) {
 	}
 	if block := content[1].(map[string]any); block["id"] != "tu_2" || !reflect.DeepEqual(block["input"], map[string]any{}) {
 		t.Fatalf("replayed tu_2 block = %#v", block)
+	}
+}
+
+func TestListModelsReturnsIDs(t *testing.T) {
+	fake := testutil.NewFakeMessages(t, nil)
+	fake.SetModels([]string{"model-a", "model-b", "model-c"})
+	p := newAdapter(t, fake, 1000)
+	lister, ok := p.(provider.ModelLister)
+	if !ok {
+		t.Fatal("messages adapter does not implement provider.ModelLister")
+	}
+	ids, err := lister.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids, []string{"model-a", "model-b", "model-c"}) {
+		t.Fatalf("ListModels() = %v, want [model-a model-b model-c]", ids)
+	}
+}
+
+func TestListModelsHTTPError(t *testing.T) {
+	fake := testutil.NewFakeMessages(t, nil)
+	fake.SetModelsStatus(http.StatusUnauthorized)
+	p := newAdapter(t, fake, 1000)
+	lister, ok := p.(provider.ModelLister)
+	if !ok {
+		t.Fatal("messages adapter does not implement provider.ModelLister")
+	}
+	ids, err := lister.ListModels(context.Background())
+	if err == nil {
+		t.Fatalf("ListModels() = %v, want non-nil error", ids)
+	}
+	if !strings.Contains(err.Error(), "list models") {
+		t.Fatalf("ListModels() error = %v, want wrapped \"list models\" context", err)
 	}
 }

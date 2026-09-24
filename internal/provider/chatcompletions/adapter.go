@@ -3,6 +3,7 @@ package chatcompletions
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,6 +27,19 @@ func New(name string, cfg config.Provider, apiKey string) (provider.Provider, er
 }
 
 func (a *Adapter) Name() string { return a.name }
+
+// ListModels reports the model ids the configured Chat Completions API currently advertises.
+func (a *Adapter) ListModels(ctx context.Context) ([]string, error) {
+	models, err := a.client.oai.ListModels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	ids := make([]string, 0, len(models.Models))
+	for _, model := range models.Models {
+		ids = append(ids, model.ID)
+	}
+	return ids, nil
+}
 
 // SetBackoff overrides the stream-setup retry delay; tests use it to avoid real sleeps.
 func (a *Adapter) SetBackoff(backoff func(attempt int) time.Duration) { a.client.Backoff = backoff }

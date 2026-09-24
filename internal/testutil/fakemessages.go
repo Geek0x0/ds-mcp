@@ -55,10 +55,12 @@ type FakeMessage struct {
 type FakeMessages struct {
 	*httptest.Server
 
-	t        testing.TB
-	mu       sync.Mutex
-	messages []FakeMessage
-	requests []map[string]any
+	t            testing.TB
+	mu           sync.Mutex
+	messages     []FakeMessage
+	requests     []map[string]any
+	models       []string
+	modelsStatus int
 }
 
 // NewFakeMessages starts a fake Messages API server scripted with messages.
@@ -79,10 +81,28 @@ func NewFakeMessages(t testing.TB, messages []FakeMessage) *FakeMessages {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", fake.handleMessages)
+	mux.HandleFunc("/v1/models", fake.handleModels)
 	fake.Server = httptest.NewServer(mux)
 	t.Cleanup(fake.Close)
 
 	return fake
+}
+
+// SetModels configures the ids served by GET /v1/models. Default: none.
+func (f *FakeMessages) SetModels(ids []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.models = append([]string(nil), ids...)
+}
+
+// SetModelsStatus scripts a non-200 HTTP status for GET /v1/models, independent
+// of the message scripting, so tests can assert ListModels surfaces HTTP errors.
+func (f *FakeMessages) SetModelsStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.modelsStatus = status
 }
 
 // RequestCount returns the number of requests recorded so far.
@@ -282,6 +302,33 @@ func (f *FakeMessages) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeEvent("message_stop", map[string]any{})
+}
+
+func (f *FakeMessages) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	f.mu.Lock()
+	status := f.modelsStatus
+	ids := append([]string(nil), f.models...)
+	f.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if status != 0 && status != http.StatusOK {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"scripted failure"}}`)
+		return
+	}
+
+	data := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		data = append(data, map[string]string{"id": id, "type": "model", "display_name": id})
+	}
+	if err := json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": false}); err != nil {
+		f.t.Errorf("encode models response: %v", err)
+	}
 }
 
 func blockGroupCount(block FakeBlock) int {

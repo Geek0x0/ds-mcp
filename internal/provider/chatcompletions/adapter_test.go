@@ -3,6 +3,9 @@ package chatcompletions
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Geek0x0/subagent-mcp/internal/config"
@@ -80,5 +83,39 @@ func TestAdapterReplaysReasoningAndToolResults(t *testing.T) {
 	tool := messages[2].(map[string]any)
 	if tool["role"] != "tool" || tool["tool_call_id"] != "c1" || tool["content"] != "a.txt" {
 		t.Fatalf("tool replay = %#v", tool)
+	}
+}
+
+func TestListModelsReturnsIDs(t *testing.T) {
+	fake := testutil.NewFakeChat(t, nil)
+	fake.SetModels([]string{"model-a", "model-b", "model-c"})
+	p := newAdapter(t, fake)
+	lister, ok := p.(provider.ModelLister)
+	if !ok {
+		t.Fatal("chatcompletions adapter does not implement provider.ModelLister")
+	}
+	ids, err := lister.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids, []string{"model-a", "model-b", "model-c"}) {
+		t.Fatalf("ListModels() = %v, want [model-a model-b model-c]", ids)
+	}
+}
+
+func TestListModelsHTTPError(t *testing.T) {
+	fake := testutil.NewFakeChat(t, nil)
+	fake.SetModelsStatus(http.StatusUnauthorized)
+	p := newAdapter(t, fake)
+	lister, ok := p.(provider.ModelLister)
+	if !ok {
+		t.Fatal("chatcompletions adapter does not implement provider.ModelLister")
+	}
+	ids, err := lister.ListModels(context.Background())
+	if err == nil {
+		t.Fatalf("ListModels() = %v, want non-nil error", ids)
+	}
+	if !strings.Contains(err.Error(), "list models") {
+		t.Fatalf("ListModels() error = %v, want wrapped \"list models\" context", err)
 	}
 }

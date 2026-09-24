@@ -35,6 +35,19 @@ func New(name string, cfg config.Provider, apiKey string) (provider.Provider, er
 
 func (a *Adapter) Name() string { return a.name }
 
+// ListModels reports the model ids the configured Messages API currently advertises.
+func (a *Adapter) ListModels(ctx context.Context) ([]string, error) {
+	pager := a.client.Models.ListAutoPaging(ctx, anthropic.ModelListParams{})
+	var ids []string
+	for pager.Next() {
+		ids = append(ids, pager.Current().ID)
+	}
+	if err := pager.Err(); err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	return ids, nil
+}
+
 func (a *Adapter) Turn(ctx context.Context, req provider.TurnRequest, onDelta func(string)) (*provider.TurnResult, error) {
 	messages, err := buildMessages(req.Messages)
 	if err != nil {

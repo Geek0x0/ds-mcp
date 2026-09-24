@@ -56,10 +56,12 @@ type FakeResponseStreamError struct {
 type FakeResponses struct {
 	*httptest.Server
 
-	t         testing.TB
-	mu        sync.Mutex
-	responses []FakeResponse
-	requests  []map[string]any
+	t            testing.TB
+	mu           sync.Mutex
+	responses    []FakeResponse
+	requests     []map[string]any
+	models       []string
+	modelsStatus int
 }
 
 // NewFakeResponses starts a fake Responses API server scripted with responses.
@@ -80,10 +82,28 @@ func NewFakeResponses(t testing.TB, responses []FakeResponse) *FakeResponses {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/responses", fake.handleResponses)
+	mux.HandleFunc("/models", fake.handleModels)
 	fake.Server = httptest.NewServer(mux)
 	t.Cleanup(fake.Close)
 
 	return fake
+}
+
+// SetModels configures the ids served by GET /models. Default: none.
+func (f *FakeResponses) SetModels(ids []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.models = append([]string(nil), ids...)
+}
+
+// SetModelsStatus scripts a non-200 HTTP status for GET /models, independent of
+// the response scripting, so tests can assert ListModels surfaces HTTP errors.
+func (f *FakeResponses) SetModelsStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.modelsStatus = status
 }
 
 // RequestCount returns the number of requests recorded so far.
@@ -234,6 +254,33 @@ func (f *FakeResponses) handleResponses(w http.ResponseWriter, r *http.Request) 
 		response["error"] = map[string]any{"code": "server_error", "message": "scripted failure"}
 	}
 	writeEvent("response."+status, map[string]any{"sequence_number": sequence, "response": response})
+}
+
+func (f *FakeResponses) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	f.mu.Lock()
+	status := f.modelsStatus
+	ids := append([]string(nil), f.models...)
+	f.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if status != 0 && status != http.StatusOK {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"error":{"message":"scripted failure","type":"server_error"}}`)
+		return
+	}
+
+	data := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		data = append(data, map[string]string{"id": id, "object": "model"})
+	}
+	if err := json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data}); err != nil {
+		f.t.Errorf("encode models response: %v", err)
+	}
 }
 
 func itemGroupCount(item FakeResponseItem) int {

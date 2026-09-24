@@ -35,10 +35,12 @@ type FakeTurn struct {
 type FakeChat struct {
 	*httptest.Server
 
-	t        testing.TB
-	mu       sync.Mutex
-	turns    []FakeTurn
-	requests []map[string]any
+	t            testing.TB
+	mu           sync.Mutex
+	turns        []FakeTurn
+	requests     []map[string]any
+	models       []string
+	modelsStatus int
 }
 
 func NewFakeChat(t testing.TB, turns []FakeTurn) *FakeChat {
@@ -56,10 +58,28 @@ func NewFakeChat(t testing.TB, turns []FakeTurn) *FakeChat {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/chat/completions", fake.handleChatCompletions)
+	mux.HandleFunc("/models", fake.handleModels)
 	fake.Server = httptest.NewServer(mux)
 	t.Cleanup(fake.Close)
 
 	return fake
+}
+
+// SetModels configures the ids served by GET /models. Default: none.
+func (f *FakeChat) SetModels(ids []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.models = append([]string(nil), ids...)
+}
+
+// SetModelsStatus scripts a non-200 HTTP status for GET /models, independent of
+// the turn scripting, so tests can assert ListModels surfaces HTTP errors.
+func (f *FakeChat) SetModelsStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.modelsStatus = status
 }
 
 func (f *FakeChat) RequestCount() int {
@@ -207,6 +227,33 @@ func (f *FakeChat) handleChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	flusher.Flush()
+}
+
+func (f *FakeChat) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	f.mu.Lock()
+	status := f.modelsStatus
+	ids := append([]string(nil), f.models...)
+	f.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if status != 0 && status != http.StatusOK {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"error":{"message":"scripted failure","type":"server_error"}}`)
+		return
+	}
+
+	data := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		data = append(data, map[string]string{"id": id, "object": "model"})
+	}
+	if err := json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data}); err != nil {
+		f.t.Errorf("encode models response: %v", err)
+	}
 }
 
 func (f *FakeChat) writeChunk(

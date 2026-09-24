@@ -3,7 +3,9 @@ package responses
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -147,5 +149,39 @@ func TestResponsesHTTPError(t *testing.T) {
 	p := newAdapter(t, fake)
 	if _, err := p.Turn(context.Background(), provider.TurnRequest{Model: "gpt-x", Messages: []provider.Message{{Role: provider.RoleUser, Text: "hi"}}}, nil); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestListModelsReturnsIDs(t *testing.T) {
+	fake := testutil.NewFakeResponses(t, nil)
+	fake.SetModels([]string{"model-a", "model-b", "model-c"})
+	p := newAdapter(t, fake)
+	lister, ok := p.(provider.ModelLister)
+	if !ok {
+		t.Fatal("responses adapter does not implement provider.ModelLister")
+	}
+	ids, err := lister.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids, []string{"model-a", "model-b", "model-c"}) {
+		t.Fatalf("ListModels() = %v, want [model-a model-b model-c]", ids)
+	}
+}
+
+func TestListModelsHTTPError(t *testing.T) {
+	fake := testutil.NewFakeResponses(t, nil)
+	fake.SetModelsStatus(http.StatusUnauthorized)
+	p := newAdapter(t, fake)
+	lister, ok := p.(provider.ModelLister)
+	if !ok {
+		t.Fatal("responses adapter does not implement provider.ModelLister")
+	}
+	ids, err := lister.ListModels(context.Background())
+	if err == nil {
+		t.Fatalf("ListModels() = %v, want non-nil error", ids)
+	}
+	if !strings.Contains(err.Error(), "list models") {
+		t.Fatalf("ListModels() error = %v, want wrapped \"list models\" context", err)
 	}
 }

@@ -16,15 +16,35 @@ import (
 	"github.com/Geek0x0/subagent-mcp/internal/tools"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 func main() {
 	sandbox.MaybeRunHelper()
 	showVersion := flag.Bool("version", false, "print version and exit")
+	checkConfig := flag.Bool("check-config", false, "validate the config file and each provider's reachability, then exit")
+	liveFlag := flag.Bool("live", false, "with --check-config, make a real minimal call to each reachable provider (billable)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("subagent-mcp %s\n", version)
 		return
+	}
+	if *checkConfig {
+		path := flag.Arg(0)
+		if path == "" {
+			defaultPath, err := config.DefaultPath()
+			if err != nil {
+				fmt.Printf("config   FAIL: %v\n", err)
+				os.Exit(1)
+			}
+			path = defaultPath
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			fmt.Printf("config   %s   FAIL: %v\n", path, err)
+			os.Exit(1)
+		}
+		fmt.Printf("config   %s   OK\n", path)
+		os.Exit(runCheck(os.Stdout, cfg, *liveFlag))
 	}
 
 	path, err := config.DefaultPath()

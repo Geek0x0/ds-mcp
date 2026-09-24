@@ -109,6 +109,31 @@ Keys are never stored in the config file. At startup the server reads the active
 
 Edit `active_provider`, provide that provider's `env_key`, and reconnect the MCP server. The provider is fixed at startup: a session cannot switch provider mid-thread, and each call's `model` must come from the active provider's list.
 
+## Validating the config
+
+`--check-config` loads and validates the config file, reports every provider's `env_key` name and whether it is set, and asks each reachable provider's API for its model list so a wrong key, base URL, or model id fails loudly:
+
+```bash
+subagent-mcp --check-config [path]
+subagent-mcp --check-config --live [path]
+```
+
+The optional `path` defaults to `$SUBAGENT_MCP_CONFIG` or `~/.config/subagent-mcp/config.toml`. Flags must come before the path. The process exits 0 when no provider failed and 1 otherwise; a missing config, unknown TOML key, or invalid field is reported naming the path or field, and a missing key is a failure only for the active provider (other providers are skipped). Output looks like:
+
+```
+config   /home/you/.config/subagent-mcp/config.toml   OK
+provider anthropic (messages)
+  key    ANTHROPIC_API_KEY   not set, skipped
+provider deepseek (chat-completions, active)
+  key    DEEPSEEK_API_KEY   set
+  api    https://api.deepseek.com   OK (2 models listed)
+  model  deepseek-flash     OK
+  model  deepseek-v4-pro     WARN: not in the provider's current model list
+result   PASS (1 checked, 1 skipped, 0 failed)
+```
+
+`model ... WARN` means a configured model id is not in the provider's current list; it does not affect the exit code. `--live` is opt-in and makes one real, billed tool-call round trip per reachable provider using `default_model` and effort `low`, printing a warning first; use it deliberately, not in CI. Neither mode ever prints a key value, only the variable names.
+
 ## Environment
 
 | Variable | Description |

@@ -49,7 +49,11 @@ func LoadAgentsMD(cwd string) (string, error) {
 		truncated := len(content) > remaining
 		if truncated {
 			content = content[:remaining]
-			for !utf8.ValidString(content) {
+			// Back off only a rune split by the cut; invalid bytes earlier in the file are kept as-is.
+			for i := 0; i < utf8.UTFMax-1 && len(content) > 0; i++ {
+				if r, size := utf8.DecodeLastRuneInString(content); r != utf8.RuneError || size != 1 {
+					break
+				}
 				content = content[:len(content)-1]
 			}
 		}

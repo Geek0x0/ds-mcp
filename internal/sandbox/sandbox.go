@@ -11,6 +11,10 @@ import (
 // HelperArg is the hidden argv[1] that turns the ds-mcp binary into the sandbox helper.
 const HelperArg = "__sandbox-exec"
 
+// deviceFiles are always writable under the sandbox; the rest of /dev (including
+// /dev/shm and block devices) stays read-only.
+var deviceFiles = []string{"/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty"}
+
 // Command returns the argv that runs argv through the helper at self with only
 // writableRoots writable.
 func Command(self string, writableRoots []string, argv ...string) []string {

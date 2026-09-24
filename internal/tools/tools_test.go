@@ -335,12 +335,12 @@ func TestRunShellSandboxed(t *testing.T) {
 	cwd := t.TempDir()
 	outside := t.TempDir()
 
-	out, code, err := RunShellSandboxed(context.Background(), cwd, "touch inside && echo ok", 10*time.Second, []string{cwd, "/dev"})
+	out, code, err := RunShellSandboxed(context.Background(), cwd, "touch inside && echo ok", 10*time.Second, []string{cwd})
 	if err != nil || code != 0 || !strings.Contains(out, "ok") {
 		t.Fatalf("inside = (%q, %d, %v)", out, code, err)
 	}
 
-	out, code, err = RunShellSandboxed(context.Background(), cwd, "touch "+filepath.Join(outside, "bad"), 10*time.Second, []string{cwd, "/dev"})
+	out, code, err = RunShellSandboxed(context.Background(), cwd, "touch "+filepath.Join(outside, "bad"), 10*time.Second, []string{cwd})
 	if err != nil || code == 0 {
 		t.Fatalf("outside = (%q, %d, %v), want non-zero exit", out, code, err)
 	}
@@ -354,7 +354,7 @@ func TestRunShellSandboxedTimeoutKillsCommand(t *testing.T) {
 		t.Skipf("landlock unavailable: %v", err)
 	}
 	start := time.Now()
-	_, code, err := RunShellSandboxed(context.Background(), t.TempDir(), "sleep 5", 200*time.Millisecond, []string{"/dev"})
+	_, code, err := RunShellSandboxed(context.Background(), t.TempDir(), "sleep 5", 200*time.Millisecond, nil)
 	if elapsed := time.Since(start); err == nil || code != -1 || elapsed > 2*time.Second {
 		t.Fatalf("RunShellSandboxed() = (%d, %v) after %v, want timeout", code, err, elapsed)
 	}

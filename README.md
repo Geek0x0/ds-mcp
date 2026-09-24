@@ -119,13 +119,15 @@ Shell calls that the policy auto-allows run under a Landlock ruleset: the server
 
 | Sandbox | Writable roots for auto-allowed shell calls |
 |---|---|
-| `read-only` | `/dev` |
-| `workspace-write` | `cwd`, `/tmp`, `$TMPDIR` when set and different and an existing directory, `/dev`, plus `config.writable_roots` |
+| `read-only` | None |
+| `workspace-write` | `cwd`, `/tmp`, `$TMPDIR` when set and different and an existing directory, plus `config.writable_roots` |
 | `danger-full-access` | Unrestricted; the command runs without the helper |
+
+In both wrapped modes the device files `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty` are also writable; the rest of `/dev`, including `/dev/shm`, is read-only. On Landlock ABI v2+ kernels (Linux 5.19+), files can be renamed or hard-linked between directories inside the writable roots.
 
 Shell calls that a human approved through elicitation run without the kernel sandbox, matching Codex escalation semantics. The sandbox fails closed: on a kernel without Landlock (Linux below 5.13) or on a non-Linux platform, a wrapped shell call exits with code 126 and `ds-mcp: landlock unavailable: ...` instead of running unsandboxed.
 
-**Safety: the application-layer policy prevents accidental misuse, and the Landlock wrapper confines auto-allowed shell writes to the roots above. Reads and network access are still unrestricted, and `write_file` and `apply_patch` writes are limited to `cwd` by an in-process path check rather than by the kernel. Landlock ABI v1 kernels (Linux 5.13–5.18) do not restrict cross-directory rename or truncate outside the writable roots. Human-approved and `danger-full-access` shell calls are not sandboxed at all. Use stronger operating-system isolation when the trust boundary requires it.**
+**Safety: the application-layer policy prevents accidental misuse, and the Landlock wrapper confines auto-allowed shell writes to the roots above. Reads and network access are still unrestricted, and `write_file` and `apply_patch` writes are limited to `cwd` by an in-process path check rather than by the kernel. On Landlock ABI v1 kernels (Linux 5.13–5.18), renaming or hard-linking a file into a different directory always fails with `EXDEV` (tools such as `git mv` break, while `mv` falls back to copying), and truncating existing files outside the writable roots is not restricted. Human-approved and `danger-full-access` shell calls are not sandboxed at all. Use stronger operating-system isolation when the trust boundary requires it.**
 
 ## Events
 

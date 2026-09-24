@@ -1,7 +1,9 @@
 package patch
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,8 +26,8 @@ func Plan(cwd string, hunks []Hunk) ([]Change, error) {
 		path := resolve(cwd, hunk.Path)
 		switch hunk.Kind {
 		case Add:
-			if _, err := os.Lstat(path); err == nil {
-				return nil, fmt.Errorf("add %s: file already exists", hunk.Path)
+			if err := checkTarget(path, "add "+hunk.Path, false); err != nil {
+				return nil, err
 			}
 			changes = append(changes, Change{Kind: Add, Path: path, NewContent: hunk.Content, Diff: hunk.Content})
 		case Delete:
@@ -49,11 +51,32 @@ func Plan(cwd string, hunks []Hunk) ([]Change, error) {
 			change := Change{Kind: Update, Path: path, NewContent: content, Diff: diff}
 			if hunk.MoveTo != "" {
 				change.MoveTo = resolve(cwd, hunk.MoveTo)
+				if change.MoveTo != path {
+					if err := checkTarget(change.MoveTo, "move "+hunk.MoveTo, true); err != nil {
+						return nil, err
+					}
+				}
 			}
 			changes = append(changes, change)
 		}
 	}
 	return changes, nil
+}
+
+// checkTarget rejects, before anything is written, a target that Commit could not
+// write as a regular file: an existing path (unless allowExisting), a directory, or
+// a path whose parent is not a directory.
+func checkTarget(path, label string, allowExisting bool) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && !allowExisting:
+		return fmt.Errorf("%s: file already exists", label)
+	case err == nil && info.IsDir():
+		return fmt.Errorf("%s: is a directory", label)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	return nil
 }
 
 func resolve(cwd, path string) string {
@@ -71,6 +94,11 @@ type replacement struct {
 }
 
 func applyChunks(original string, chunks []Chunk) (string, string, error) {
+	// ponytail: A file containing any CRLF is treated as CRLF throughout; mixed-ending files are normalized to CRLF.
+	crlf := strings.Contains(original, "\r\n")
+	if crlf {
+		original = strings.ReplaceAll(original, "\r\n", "\n")
+	}
 	trailingNewline := original == "" || strings.HasSuffix(original, "\n")
 	var lines []string
 	if original != "" {
@@ -123,6 +151,9 @@ func applyChunks(original string, chunks []Chunk) (string, string, error) {
 	result := strings.Join(out, "\n")
 	if trailingNewline && len(out) > 0 {
 		result += "\n"
+	}
+	if crlf {
+		result = strings.ReplaceAll(result, "\n", "\r\n")
 	}
 	return result, diff.String(), nil
 }

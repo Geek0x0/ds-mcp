@@ -121,9 +121,9 @@ func (s *Session) AttachRollout(r *rollout.Recorder) {
 func (s *Session) shellWritableRoots() ([]string, bool) {
 	switch s.sandbox {
 	case policy.Sandbox("read-only"):
-		return []string{"/dev"}, true
+		return []string{}, true
 	case policy.Sandbox("workspace-write"):
-		roots := []string{s.cwd, "/tmp", "/dev"}
+		roots := []string{s.cwd, "/tmp"}
 		if tmp := os.Getenv("TMPDIR"); tmp != "" && tmp != "/tmp" {
 			if info, err := os.Stat(tmp); err == nil && info.IsDir() {
 				roots = append(roots, tmp)

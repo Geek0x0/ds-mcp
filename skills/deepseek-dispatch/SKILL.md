@@ -23,8 +23,10 @@ Use the most recent returned ID with `deepseek-reply`; the ID remains the same f
 
 Choose the narrowest sandbox that permits the task:
 
-- `read-only` (default) permits `read_file` and the policy's shell-command allowlist. Other operations fall outside the sandbox. Auto-allowed shell commands run with `/dev` as their only writable root.
-- `workspace-write` permits `read_file`, all `shell` calls, and `write_file` when its resolved path stays inside `cwd`. A `write_file` path containing `..` or escaping through a symlink is outside the sandbox. Auto-allowed shell commands are wrapped in a Landlock ruleset whose writable roots are `cwd`, `/tmp`, `$TMPDIR`, `/dev`, and any `config.writable_roots` entries; writes anywhere else fail with `Permission denied` instead of being heuristically detected.
+- `read-only` (default) permits `read_file` and the policy's shell-command allowlist. Other operations fall outside the sandbox. Auto-allowed shell commands run with no writable roots.
+- `workspace-write` permits `read_file`, all `shell` calls, and `write_file` when its resolved path stays inside `cwd`. A `write_file` path containing `..` or escaping through a symlink is outside the sandbox. Auto-allowed shell commands are wrapped in a Landlock ruleset whose writable roots are `cwd`, `/tmp`, `$TMPDIR`, and any `config.writable_roots` entries; writes anywhere else fail with `Permission denied` instead of being heuristically detected. Tools that write caches under `$HOME` (for example `go test` writing `~/.cache/go-build`) need that directory listed in `config.writable_roots`.
+
+In both wrapped modes `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty` stay writable; the rest of `/dev`, including `/dev/shm`, does not.
 - `danger-full-access` treats every built-in tool operation as inside the sandbox and runs shell commands without the kernel wrapper.
 
 The shell-command allowlist contains `ls`, `cat`, `head`, `tail`, `rg`, `grep`, `find`, `pwd`, `wc`, `stat`, `which`, and `echo`, plus `git status`, `git diff`, `git log`, `git show`, `git branch`, `git blame`, `git rev-parse`, and `git ls-files`.
@@ -33,7 +35,7 @@ The shell-command allowlist contains `ls`, `cat`, `head`, `tail`, `rg`, `grep`, 
 
 The kernel sandbox fails closed: on a kernel without Landlock (Linux below 5.13) or on a non-Linux platform, an auto-allowed shell call exits with code 126 and a `ds-mcp: landlock unavailable: ...` message rather than running unsandboxed. Shell calls a human approves run without the wrapper, and `danger-full-access` never applies it.
 
-**Safety: the policy prevents accidental misuse, and the Landlock wrapper confines auto-allowed shell writes to the roots above. Reads and network access remain unrestricted, `write_file` and `apply_patch` writes are limited to `cwd` in-process rather than by the kernel, and Landlock ABI v1 (Linux 5.13–5.18) does not restrict cross-directory rename or truncate outside the writable roots. Use stronger operating-system isolation when the trust boundary requires it.**
+**Safety: the policy prevents accidental misuse, and the Landlock wrapper confines auto-allowed shell writes to the roots above. Reads and network access remain unrestricted, `write_file` and `apply_patch` writes are limited to `cwd` in-process rather than by the kernel, and on Landlock ABI v1 (Linux 5.13–5.18) renaming or hard-linking into a different directory always fails with `EXDEV` while truncating files outside the writable roots is not restricted. Use stronger operating-system isolation when the trust boundary requires it.**
 
 The `approval-policy` determines what happens to operations inside or outside the selected sandbox:
 

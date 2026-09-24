@@ -27,12 +27,20 @@ func run(args []string) error {
 		return err
 	}
 	// BestEffort silently becomes a no-op on kernels without Landlock, so require ABI >= 1 first.
-	if err := Available(); err != nil {
-		return err
+	abi, err := llsyscall.LandlockGetABIVersion()
+	if err != nil {
+		return fmt.Errorf("landlock unavailable: %w", err)
+	}
+	writable := landlock.RWDirs(roots...)
+	// "refer" permits rename/link between directories inside the roots. ABI v1 cannot grant it,
+	// and requesting it there makes BestEffort drop the whole ruleset, so only ask on v2+.
+	if abi >= 2 {
+		writable = writable.WithRefer()
 	}
 	if err := landlock.V10.BestEffort().RestrictPaths(
 		landlock.RODirs("/"),
-		landlock.RWDirs(roots...),
+		writable,
+		landlock.RWFiles(deviceFiles...).IgnoreIfMissing(),
 	); err != nil {
 		return fmt.Errorf("landlock unavailable: %w", err)
 	}

@@ -62,17 +62,46 @@ func TestHelperRestrictsWrites(t *testing.T) {
 	inside := t.TempDir()
 	outside := t.TempDir()
 
-	out, code := runHelper(t, []string{inside, "/dev"}, "touch "+filepath.Join(inside, "ok")+" && echo x > /dev/null && cat /etc/passwd > /dev/null")
+	out, code := runHelper(t, []string{inside}, "touch "+filepath.Join(inside, "ok")+" && echo x > /dev/null && echo y > /dev/stdout && cat /etc/passwd > /dev/null")
 	if code != 0 {
 		t.Fatalf("inside write exit = %d, output = %q", code, out)
 	}
 
-	out, code = runHelper(t, []string{inside, "/dev"}, "touch "+filepath.Join(outside, "bad"))
+	out, code = runHelper(t, []string{inside}, "touch "+filepath.Join(outside, "bad"))
 	if code == 0 {
 		t.Fatalf("outside write succeeded, output = %q", out)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "bad")); err == nil {
 		t.Fatalf("outside file was created")
+	}
+}
+
+func TestHelperAllowsCrossDirectoryRenameInsideRoot(t *testing.T) {
+	if err := Available(); err != nil {
+		t.Skipf("landlock unavailable: %v", err)
+	}
+	inside := t.TempDir()
+
+	// ln uses link(2) with no copy fallback, so it fails with EXDEV unless the root grants "refer".
+	out, code := runHelper(t, []string{inside}, "cd "+inside+" && mkdir a b && touch a/x && ln a/x b/x")
+	if code != 0 {
+		t.Fatalf("cross-directory link exit = %d, output = %q", code, out)
+	}
+}
+
+func TestHelperDeniesDeviceDirectoryWrites(t *testing.T) {
+	if err := Available(); err != nil {
+		t.Skipf("landlock unavailable: %v", err)
+	}
+	if info, err := os.Stat("/dev/shm"); err != nil || !info.IsDir() {
+		t.Skip("/dev/shm unavailable")
+	}
+	probe := filepath.Join("/dev/shm", "ds-mcp-probe-"+filepath.Base(t.TempDir()))
+	t.Cleanup(func() { _ = os.Remove(probe) })
+
+	out, code := runHelper(t, []string{t.TempDir()}, "touch "+probe)
+	if code == 0 {
+		t.Fatalf("/dev/shm write succeeded, output = %q", out)
 	}
 }
 

@@ -129,6 +129,17 @@ func TestApplyEndOfFileAnchor(t *testing.T) {
 	}
 }
 
+func TestApplyPreservesCRLF(t *testing.T) {
+	cwd := t.TempDir()
+	write(t, filepath.Join(cwd, "f.txt"), "  a\r\nb\r\n  a\r\n")
+	if _, err := applyText(t, cwd, "*** Begin Patch\n*** Update File: f.txt\n@@\n-  a\n+c\n*** End of File\n*** End Patch"); err != nil {
+		t.Fatalf("apply error = %v", err)
+	}
+	if got := read(t, filepath.Join(cwd, "f.txt")); got != "  a\r\nb\r\nc\r\n" {
+		t.Errorf("f.txt = %q", got)
+	}
+}
+
 func TestApplyPreservesMissingTrailingNewline(t *testing.T) {
 	cwd := t.TempDir()
 	write(t, filepath.Join(cwd, "f.txt"), "a\nb")
@@ -144,12 +155,19 @@ func TestPlanFailureWritesNothing(t *testing.T) {
 	cwd := t.TempDir()
 	write(t, filepath.Join(cwd, "a.txt"), "one\n")
 	write(t, filepath.Join(cwd, "exists.txt"), "here\n")
+	write(t, filepath.Join(cwd, "plain"), "not a dir\n")
+	if err := os.Mkdir(filepath.Join(cwd, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	for name, text := range map[string]string{
 		"chunk not found": "*** Begin Patch\n*** Add File: new.txt\n+x\n*** Update File: a.txt\n-missing\n+y\n*** End Patch",
 		"add existing":    "*** Begin Patch\n*** Add File: exists.txt\n+x\n*** End Patch",
 		"update missing":  "*** Begin Patch\n*** Update File: nope.txt\n-x\n+y\n*** End Patch",
 		"delete missing":  "*** Begin Patch\n*** Delete File: nope.txt\n*** End Patch",
+		"add under file":  "*** Begin Patch\n*** Update File: a.txt\n-one\n+ONE\n*** Add File: plain/child.txt\n+x\n*** End Patch",
+		"move under file": "*** Begin Patch\n*** Update File: a.txt\n*** Move to: plain/a.txt\n-one\n+ONE\n*** End Patch",
+		"move onto dir":   "*** Begin Patch\n*** Update File: a.txt\n*** Move to: adir\n-one\n+ONE\n*** End Patch",
 	} {
 		t.Run(name, func(t *testing.T) {
 			hunks, err := Parse(text)

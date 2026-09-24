@@ -90,6 +90,20 @@ func TestLoadAgentsMDTruncatesOnRuneBoundary(t *testing.T) {
 	}
 }
 
+func TestLoadAgentsMDTruncationKeepsContentAfterInvalidByte(t *testing.T) {
+	cwd := evalDir(t, t.TempDir())
+	// A Latin-1 byte early in an oversized file must not shrink the kept content.
+	writeAgentsFile(t, filepath.Join(cwd, "AGENTS.md"), "rule-\xe9-"+strings.Repeat("x", 40000))
+
+	got, err := LoadAgentsMD(cwd)
+	if err != nil {
+		t.Fatalf("LoadAgentsMD() error = %v", err)
+	}
+	if n := strings.Count(got, "x"); n < agentsMDMaxBytes-16 {
+		t.Fatalf("kept %d content bytes, want about %d", n, agentsMDMaxBytes)
+	}
+}
+
 func TestLoadAgentsMDReadErrorFails(t *testing.T) {
 	cwd := evalDir(t, t.TempDir())
 	if err := os.Mkdir(filepath.Join(cwd, "AGENTS.md"), 0o755); err != nil {

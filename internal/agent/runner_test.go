@@ -959,4 +959,17 @@ func TestRunnerShellSandboxing(t *testing.T) {
 			t.Fatalf("result = %q, want success", result)
 		}
 	})
+
+	t.Run("workspace-write denies /dev/shm but allows /dev/null", func(t *testing.T) {
+		if info, err := os.Stat("/dev/shm"); err != nil || !info.IsDir() {
+			t.Skip("/dev/shm unavailable")
+		}
+		probe := filepath.Join("/dev/shm", "ds-mcp-runner-probe-"+strconv.Itoa(os.Getpid()))
+		t.Cleanup(func() { _ = os.Remove(probe) })
+		result := runShellOnce(t, Options{Sandbox: "workspace-write", Approval: "never"}, &stubApprover{},
+			"echo x > /dev/null && touch "+probe)
+		if strings.HasPrefix(result, "exit code: 0") || !strings.Contains(result, "Permission denied") {
+			t.Fatalf("result = %q, want /dev/shm permission denied", result)
+		}
+	})
 }

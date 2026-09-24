@@ -53,6 +53,8 @@ The server checks `DEEPSEEK_API_KEY` first. If it is unset or empty, the server 
 
 One of these credential sources is required. The auth file must have no group or other access (permissions no more permissive than `0600`); otherwise, the server refuses to start and instructs you to run `chmod 600` on the file. Invalid JSON produces a startup error identifying the file as invalid JSON, and an empty or missing `api_key` produces a startup error identifying that field instead of silently falling through to the generic credential-required error.
 
+Every shell command runs with all `DEEPSEEK_*` environment variables removed, so the agent cannot read the key from the server environment, and `read_file` refuses `~/.config/ds-mcp/auth.json` including when that file is reached through a symlink. On Linux, a sandboxed shell also cannot read the server's `/proc/<pid>/environ`, because Landlock blocks cross-domain ptrace-style access. A shell command can still read `auth.json` directly, however, because reads are not sandboxed; when dispatching through an MCP client it is therefore preferable to supply the key via `DEEPSEEK_API_KEY` in the MCP server `env` rather than relying on the auth file.
+
 ## Tools
 
 ### `deepseek`
@@ -63,7 +65,7 @@ Starts a new coding-agent thread.
 |---|---:|---|---|
 | `prompt` | Yes | — | String task prompt for the new thread. |
 | `model` | No | `deepseek-v4-pro` | DeepSeek model name. |
-| `reasoning-effort` | No | `high` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. `medium` is sent to the API as `high`, and `xhigh` as `max`. This argument wins over `config.model_reasoning_effort`; an invalid value is an error. |
+| `reasoning-effort` | No | `high` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. `medium` is sent to the API as `high`, and `xhigh` as `max`. This argument wins over `config.model_reasoning_effort`; an invalid value is an error. Assistant `reasoning_content` is carried back to the API in the conversation history, as DeepSeek thinking mode requires with tools. |
 | `cwd` | No | Server process working directory | Absolute path to an existing directory. |
 | `sandbox` | No | `read-only` | `read-only`, `workspace-write`, or `danger-full-access`. |
 | `approval-policy` | No | `on-request` | `untrusted`, `on-request`, `on-failure`, or `never`. |
@@ -93,11 +95,17 @@ The DeepSeek agent runs inside the thread with four built-in tools:
 | Tool | Arguments | Description |
 |---|---|---|
 | `shell` | `command`, optional `timeout_seconds`, optional `justification` | Run a bash command in `cwd`. Timeouts are clamped to 600 seconds. |
-| `read_file` | `path`, optional `justification` | Read a file; relative paths resolve against `cwd`. |
+| `read_file` | `path`, optional `offset`, optional `limit`, optional `justification` | Read a file; relative paths resolve against `cwd`. `offset` is a 1-based start line and `limit` caps the number of lines. Output is capped at 16 KiB of whole lines; truncation appends `[content truncated: N bytes total; continue with offset=K]`, a line limit appends `[more lines follow; continue with offset=K]`, and an offset past the end returns `[offset K is past the end of the file (N lines)]`. |
 | `write_file` | `path`, `content`, optional `justification` | Create or overwrite a whole file, creating parent directories. |
 | `apply_patch` | `patch`, optional `justification` | Edit files with a Codex-format patch. |
 
 `apply_patch` accepts a patch from `*** Begin Patch` to `*** End Patch` containing one or more `*** Add File: <path>` (with `+` content lines), `*** Delete File: <path>`, or `*** Update File: <path>` sections, an optional `*** Move to: <path>` after an update header, `@@` chunk headers, and `' '` context, `-` removed, and `+` added lines. `*** End of File` anchors a chunk at the end of the file. Leading and trailing whitespace around the whole patch, a `<<'EOF'` heredoc wrapper, and CRLF line endings are tolerated. The whole patch is parsed and matched in memory first: if any chunk fails to match, or an Add targets an existing file, nothing is written. Context matching tries exact lines, then ignores trailing whitespace, then ignores surrounding whitespace. The tool result starts with `Success. Updated the following files:` followed by `A`, `M`, or `D` plus the path of each change.
+
+## Cancellation and concurrency
+
+The server honors the standard MCP `notifications/cancelled` message for in-flight `deepseek` and `deepseek-reply` calls. Cancelling a call stops the DeepSeek request, kills any running shell command, and releases the thread lock; the call returns an error containing `context canceled`, and the thread stays resumable with `deepseek-reply`. A cancellation that arrives before a queued call starts is ignored.
+
+The stdio server processes up to 32 tool calls concurrently (mcp-go's default is 5).
 
 ## Sandbox and approvals
 
@@ -146,6 +154,8 @@ During a running call, the server emits `deepseek/event` notifications with `thr
 
 Operations stopped by policy or denied approval do not begin execution and therefore do not emit `exec_command_begin` or `exec_command_end`.
 
+When a `tools/call` carries `_meta.progressToken`, the server additionally sends standard `notifications/progress` notifications for that call alongside the unchanged `deepseek/event` notifications. The `progress` value increases from 1, and `message` carries a short summary: `started`, `shell: <cmd>`, `apply_patch: <paths>`, `<tool>: <path>`, `agent: <first line>`, `completed`, or `error: <msg>`, each at most 200 characters.
+
 ## Rollout files
 
 Every session writes a Codex-compatible rollout as JSONL under `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDTHH-MM-SS>-<threadId>.jsonl`, using UTC and `~/.codex` when `CODEX_HOME` is unset. Directories are created `0700` and the file is `0600`. Each line is `{"timestamp": ..., "type": ..., "payload": {...}}` with the Codex line types `session_meta`, `turn_context`, `response_item`, and `event_msg`. Codex ecosystem tools can read these files for usage reporting, session viewing, and audit; `originator` is `ds-mcp` and `model_provider` is `deepseek`, and `session_meta` records the working directory, the full composed system prompt, and the Git branch and commit when `cwd` is in a repository. Because the files are written but never read back, these sessions are visible to `codex resume` but cannot actually be resumed by Codex.
@@ -157,7 +167,7 @@ The rollout records the prompt, the composed system prompt, tool arguments, tool
 ## Notes
 
 - This repository's `.mcp.json` exposes `ds-mcp` as a project-level MCP server when Claude Code is opened inside the repository, which is useful for self-testing.
-- Sessions are stored in memory only. They are lost when the server restarts; there is no persistence or cross-process resume, and rollout files are write-only.
+- Sessions are stored in memory only. They are lost when the server restarts; there is no persistence or cross-process resume, and rollout files are write-only. Sessions idle for more than 24 hours are evicted, and when more than 256 sessions exist the least recently used idle ones are evicted; busy sessions are never evicted. An evicted `threadId` returns `unknown threadId` like a server restart.
 - Run `go test ./... -race` to execute the test suite with the race detector.
 
 ## Non-goals

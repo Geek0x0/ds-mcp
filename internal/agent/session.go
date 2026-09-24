@@ -2,7 +2,9 @@ package agent
 
 import (
 	"os"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/Geek0x0/ds-mcp/internal/policy"
 	"github.com/Geek0x0/ds-mcp/internal/rollout"
@@ -12,6 +14,11 @@ import (
 )
 
 const DefaultMaxTurns = 50
+
+const (
+	sessionIdleTTL = 24 * time.Hour
+	maxSessions    = 256
+)
 
 const DefaultSystemPrompt = `You are ds-mcp, a coding agent powered by DeepSeek. You work inside a fixed working directory using four tools:
 
@@ -49,16 +56,18 @@ type Session struct {
 	rollout         *rollout.Recorder
 	turnID          string
 	totalUsage      tokenUsage
+	lastUsed        time.Time
 	mu              sync.Mutex
 }
 
 type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
+	now      func() time.Time
 }
 
 func NewManager() *Manager {
-	return &Manager{sessions: make(map[string]*Session)}
+	return &Manager{sessions: make(map[string]*Session), now: time.Now}
 }
 
 func (m *Manager) Create(o Options) *Session {
@@ -92,13 +101,63 @@ func (m *Manager) Create(o Options) *Session {
 			Role:    openai.ChatMessageRoleSystem,
 			Content: o.SystemPrompt,
 		}},
+		lastUsed: m.now(),
 	}
 
 	m.mu.Lock()
+	m.evictLocked()
 	m.sessions[session.ID] = session
 	m.mu.Unlock()
 
 	return session
+}
+
+// evictLocked drops idle sessions that have been unused for longer than
+// sessionIdleTTL, then trims the map to leave room for one new session.
+// m.mu must be held. Sessions whose mu is held are busy and never evicted.
+func (m *Manager) evictLocked() {
+	now := m.now()
+	for id, existing := range m.sessions {
+		if !existing.mu.TryLock() {
+			continue
+		}
+		lastUsed := existing.lastUsed
+		existing.mu.Unlock()
+		if now.Sub(lastUsed) > sessionIdleTTL {
+			delete(m.sessions, id)
+		}
+	}
+
+	if len(m.sessions) < maxSessions {
+		return
+	}
+
+	type idleSession struct {
+		id       string
+		lastUsed time.Time
+	}
+	idle := make([]idleSession, 0, len(m.sessions))
+	for id, existing := range m.sessions {
+		if !existing.mu.TryLock() {
+			continue
+		}
+		idle = append(idle, idleSession{id: id, lastUsed: existing.lastUsed})
+		existing.mu.Unlock()
+	}
+	sort.Slice(idle, func(i, j int) bool {
+		return idle[i].lastUsed.Before(idle[j].lastUsed)
+	})
+	for _, candidate := range idle {
+		if len(m.sessions) < maxSessions {
+			break
+		}
+		existing, ok := m.sessions[candidate.id]
+		if !ok || !existing.mu.TryLock() {
+			continue
+		}
+		delete(m.sessions, candidate.id)
+		existing.mu.Unlock()
+	}
 }
 
 func (m *Manager) Get(id string) (*Session, bool) {

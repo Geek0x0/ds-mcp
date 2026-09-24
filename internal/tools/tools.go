@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,6 +81,7 @@ func runCommand(ctx context.Context, cwd string, argv []string, timeout time.Dur
 	var buf limitedBuffer
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = cwd
+	cmd.Env = scrubbedEnv()
 	// ponytail: Linux process-group signaling kills ordinary descendants, and WaitDelay bounds
 	// inherited-pipe waits. A descendant that escapes the group can survive without being reported.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -111,14 +114,45 @@ func runCommand(ctx context.Context, cwd string, argv []string, timeout time.Dur
 	return out, -1, runErr
 }
 
+// scrubbedEnv returns the current environment without DEEPSEEK_ variables so
+// that commands run by the agent cannot read the API key from the server's
+// environment.
+func scrubbedEnv() []string {
+	env := os.Environ()
+	scrubbed := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "DEEPSEEK_") {
+			continue
+		}
+		scrubbed = append(scrubbed, entry)
+	}
+	return scrubbed
+}
+
+// ReadFile reads a file, returning at most MaxOutputBytes bytes. It is
+// equivalent to ReadFileRange with a zero offset and no line limit.
 func ReadFile(ctx context.Context, cwd, path string) (string, error) {
+	return ReadFileRange(ctx, cwd, path, 0, 0)
+}
+
+// ReadFileRange reads at most limit lines starting at the 1-based line offset,
+// returning at most MaxOutputBytes bytes. A non-positive offset means line 1
+// and a non-positive limit means no line limit. Continuation markers in the
+// result tell the caller which line to request next.
+func ReadFileRange(ctx context.Context, cwd, path string, offset, limit int) (string, error) {
+	if isCredentialFile(cwd, path) {
+		return "", fmt.Errorf("refusing to read the ds-mcp credential file: %s", resolvePath(cwd, path))
+	}
+	if offset < 1 {
+		offset = 1
+	}
+
 	readCtx, cancel := context.WithTimeout(ctx, DefaultShellTimeout)
 	defer cancel()
 
 	type readResult struct {
-		data      []byte
-		totalSize int64
-		err       error
+		content string
+		err     error
 	}
 
 	resultCh := make(chan readResult, 1)
@@ -140,15 +174,8 @@ func ReadFile(ctx context.Context, cwd, path string) (string, error) {
 		}
 		defer file.Close()
 
-		var totalSize int64
-		if info, statErr := file.Stat(); statErr == nil {
-			totalSize = info.Size()
-		}
-		data, err := io.ReadAll(io.LimitReader(file, int64(MaxOutputBytes)+1))
-		if totalSize < int64(len(data)) {
-			totalSize = int64(len(data))
-		}
-		resultCh <- readResult{data: data, totalSize: totalSize, err: err}
+		content, err := readFileRange(file, offset, limit)
+		resultCh <- readResult{content: content, err: err}
 	}()
 
 	var file *os.File
@@ -160,10 +187,7 @@ func ReadFile(ctx context.Context, cwd, path string) (string, error) {
 			if result.err != nil {
 				return "", result.err
 			}
-			if len(result.data) <= MaxOutputBytes {
-				return string(result.data), nil
-			}
-			return string(result.data[:MaxOutputBytes]) + fmt.Sprintf("\n[content truncated: %d bytes total]", result.totalSize), nil
+			return result.content, nil
 		case <-readCtx.Done():
 			if file != nil {
 				_ = file.Close()
@@ -174,6 +198,117 @@ func ReadFile(ctx context.Context, cwd, path string) (string, error) {
 			return "", readCtx.Err()
 		}
 	}
+}
+
+// readFileRange streams the open file with a bufio.Reader, stopping as soon as
+// the output cap or the line limit is reached.
+func readFileRange(file *os.File, offset, limit int) (string, error) {
+	reader := bufio.NewReaderSize(file, MaxOutputBytes+1)
+
+	var totalSize int64
+	if info, statErr := file.Stat(); statErr == nil {
+		totalSize = info.Size()
+	}
+	var bytesRead int64
+
+	lineNo := 1
+	newlines := 0
+	for lineNo < offset {
+		line, err := reader.ReadSlice('\n')
+		bytesRead += int64(len(line))
+		switch {
+		case err == nil:
+			newlines++
+			lineNo++
+		case errors.Is(err, bufio.ErrBufferFull):
+			// Still inside a line longer than the reader buffer.
+		case errors.Is(err, io.EOF):
+			lines := newlines
+			if len(line) > 0 {
+				lines++
+			}
+			return fmt.Sprintf("[offset %d is past the end of the file (%d lines)]", offset, lines), nil
+		default:
+			return "", err
+		}
+	}
+
+	out := make([]byte, 0, MaxOutputBytes)
+	returned := 0
+	for {
+		if limit > 0 && returned >= limit {
+			if _, err := reader.Peek(1); err != nil {
+				return string(out), nil
+			}
+			return string(out) + fmt.Sprintf("\n[more lines follow; continue with offset=%d]", lineNo), nil
+		}
+
+		line, err := reader.ReadSlice('\n')
+		bytesRead += int64(len(line))
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		if len(line) == 0 {
+			// End of file at a line boundary.
+			if len(out) == 0 && offset > 1 {
+				return fmt.Sprintf("[offset %d is past the end of the file (%d lines)]", offset, offset-1), nil
+			}
+			return string(out), nil
+		}
+		if len(out)+len(line) > MaxOutputBytes {
+			// The current line does not fit. Keep whole lines when at least one
+			// whole line was returned; when a single line alone exceeds the cap,
+			// keep its first MaxOutputBytes bytes and resume after it.
+			if len(out) == 0 {
+				out = append(out, line[:MaxOutputBytes]...)
+				lineNo++
+			}
+			size := totalSize
+			if bytesRead > size {
+				size = bytesRead
+			}
+			return string(out) +
+				fmt.Sprintf("\n[content truncated: %d bytes total; continue with offset=%d]", size, lineNo), nil
+		}
+		out = append(out, line...)
+		if err == nil {
+			returned++
+			lineNo++
+		}
+		if errors.Is(err, io.EOF) {
+			// The final line without a trailing newline was returned in full.
+			return string(out), nil
+		}
+	}
+}
+
+// credentialFile returns the path of the ds-mcp credential file, or "" when
+// the user home directory cannot be resolved.
+func credentialFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "ds-mcp", "auth.json")
+}
+
+func isCredentialFile(cwd, path string) bool {
+	credential := credentialFile()
+	if credential == "" {
+		return false
+	}
+	return resolveForComparison(resolvePath(cwd, path)) == resolveForComparison(credential)
+}
+
+// resolveForComparison follows symlinks when possible so that a link pointing
+// at a protected file compares equal to the file itself. When resolution fails
+// (for example because the path does not exist), it falls back to a lexical
+// comparison.
+func resolveForComparison(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
 }
 
 func WriteFile(cwd, path, content string) error {

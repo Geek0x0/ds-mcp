@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -191,6 +192,56 @@ func readPIDFile(t *testing.T, path string) int {
 	return pid
 }
 
+func TestRunShellScrubsDeepSeekEnv(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-test-secret")
+	t.Setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
+	t.Setenv("DS_MCP_KEEP_ME", "kept")
+
+	out, exitCode, err := RunShell(context.Background(), t.TempDir(), "env", 5*time.Second)
+	if err != nil {
+		t.Fatalf("RunShell() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("RunShell() exitCode = %d, want 0", exitCode)
+	}
+	if strings.Contains(out, "sk-test-secret") {
+		t.Errorf("RunShell() output leaked DEEPSEEK_API_KEY value: %q", out)
+	}
+	if strings.Contains(out, "DEEPSEEK_") {
+		t.Errorf("RunShell() output contains a DEEPSEEK_ variable: %q", out)
+	}
+	if !strings.Contains(out, "DS_MCP_KEEP_ME=kept") {
+		t.Errorf("RunShell() output does not contain DS_MCP_KEEP_ME=kept: %q", out)
+	}
+}
+
+func TestRunShellSandboxedScrubsDeepSeekEnv(t *testing.T) {
+	if err := sandbox.Available(); err != nil {
+		t.Skipf("landlock unavailable: %v", err)
+	}
+	t.Setenv("DEEPSEEK_API_KEY", "sk-test-secret")
+	t.Setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
+	t.Setenv("DS_MCP_KEEP_ME", "kept")
+
+	cwd := t.TempDir()
+	out, exitCode, err := RunShellSandboxed(context.Background(), cwd, "env", 5*time.Second, []string{cwd})
+	if err != nil {
+		t.Fatalf("RunShellSandboxed() error = %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("RunShellSandboxed() exitCode = %d, want 0", exitCode)
+	}
+	if strings.Contains(out, "sk-test-secret") {
+		t.Errorf("RunShellSandboxed() output leaked DEEPSEEK_API_KEY value: %q", out)
+	}
+	if strings.Contains(out, "DEEPSEEK_") {
+		t.Errorf("RunShellSandboxed() output contains a DEEPSEEK_ variable: %q", out)
+	}
+	if !strings.Contains(out, "DS_MCP_KEEP_ME=kept") {
+		t.Errorf("RunShellSandboxed() output does not contain DS_MCP_KEEP_ME=kept: %q", out)
+	}
+}
+
 func waitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -236,7 +287,7 @@ func TestReadFile(t *testing.T) {
 		if len(got) <= MaxOutputBytes || len(got) >= MaxOutputBytes+100 {
 			t.Errorf("len(ReadFile()) = %d, want slightly more than %d", len(got), MaxOutputBytes)
 		}
-		const marker = "[content truncated: 20000 bytes total]"
+		const marker = "[content truncated: 20000 bytes total; continue with offset=2]"
 		if !strings.HasSuffix(got, marker) {
 			t.Errorf("ReadFile() result suffix = %q, want %q", got[len(got)-len(marker):], marker)
 		}
@@ -264,7 +315,7 @@ func TestReadFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadFile() error = %v", err)
 		}
-		const marker = "[content truncated: 268435456 bytes total]"
+		const marker = "[content truncated: 268435456 bytes total; continue with offset=2]"
 		if !strings.HasSuffix(got, marker) {
 			t.Errorf("ReadFile() result does not end with %q", marker)
 		}
@@ -298,6 +349,162 @@ func TestReadFile(t *testing.T) {
 			t.Fatal("ReadFile() error = nil, want an error")
 		}
 	})
+}
+
+func TestReadFileRange(t *testing.T) {
+	cwd := t.TempDir()
+	const content = "l1\nl2\nl3\nl4\nl5\n"
+	if err := os.WriteFile(filepath.Join(cwd, "lines.txt"), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile fixture: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		offset int
+		limit  int
+		want   string
+	}{
+		{
+			name:   "line limit stops before end of file",
+			offset: 2,
+			limit:  2,
+			want:   "l2\nl3\n\n[more lines follow; continue with offset=4]",
+		},
+		{
+			name:   "offset to last lines",
+			offset: 4,
+			limit:  0,
+			want:   "l4\nl5\n",
+		},
+		{
+			name:   "zero offset reads whole file",
+			offset: 0,
+			limit:  0,
+			want:   content,
+		},
+		{
+			name:   "offset past end of file",
+			offset: 9,
+			limit:  0,
+			want:   "[offset 9 is past the end of the file (5 lines)]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ReadFileRange(context.Background(), cwd, "lines.txt", tt.offset, tt.limit)
+			if err != nil {
+				t.Fatalf("ReadFileRange(offset=%d, limit=%d) error = %v", tt.offset, tt.limit, err)
+			}
+			if got != tt.want {
+				t.Errorf("ReadFileRange(offset=%d, limit=%d) = %q, want %q", tt.offset, tt.limit, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadFileRangeByteCapKeepsWholeLines(t *testing.T) {
+	cwd := t.TempDir()
+	var fileContent strings.Builder
+	for i := 1; i <= 3000; i++ {
+		fmt.Fprintf(&fileContent, "%09d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "many-lines.txt"), []byte(fileContent.String()), 0o644); err != nil {
+		t.Fatalf("WriteFile fixture: %v", err)
+	}
+
+	got, err := ReadFileRange(context.Background(), cwd, "many-lines.txt", 1, 0)
+	if err != nil {
+		t.Fatalf("ReadFileRange() error = %v", err)
+	}
+
+	const marker = "\n[content truncated: 30000 bytes total; continue with offset=1639]"
+	if !strings.HasSuffix(got, marker) {
+		t.Fatalf("ReadFileRange() does not end with %q", marker)
+	}
+	head := strings.TrimSuffix(got, marker)
+	if len(head) > MaxOutputBytes {
+		t.Errorf("content length = %d, want <= %d", len(head), MaxOutputBytes)
+	}
+	if !strings.HasSuffix(head, "\n") {
+		t.Errorf("content does not end in a whole line: %q", head)
+	}
+	// 16384/10 = 1638 whole 10-byte lines fit in the cap.
+	if want := 1638 * 10; len(head) != want {
+		t.Errorf("content length = %d, want %d", len(head), want)
+	}
+
+	next, err := ReadFileRange(context.Background(), cwd, "many-lines.txt", 1639, 0)
+	if err != nil {
+		t.Fatalf("ReadFileRange(offset=1639) error = %v", err)
+	}
+	firstLine := fmt.Sprintf("%09d\n", 1639)
+	if !strings.HasPrefix(next, firstLine) {
+		t.Errorf("ReadFileRange(offset=1639) does not start with line 1639 (%q)", firstLine)
+	}
+}
+
+func TestReadFileRangeSingleHugeLine(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "huge-line.txt"), []byte(strings.Repeat("a", 20000)), 0o644); err != nil {
+		t.Fatalf("WriteFile fixture: %v", err)
+	}
+
+	got, err := ReadFileRange(context.Background(), cwd, "huge-line.txt", 1, 0)
+	if err != nil {
+		t.Fatalf("ReadFileRange() error = %v", err)
+	}
+
+	const marker = "\n[content truncated: 20000 bytes total; continue with offset=2]"
+	if !strings.HasSuffix(got, marker) {
+		t.Fatalf("ReadFileRange() does not end with %q", marker)
+	}
+	line := strings.TrimSuffix(got, marker)
+	if len(line) != MaxOutputBytes {
+		t.Errorf("content length = %d, want %d", len(line), MaxOutputBytes)
+	}
+	if line != strings.Repeat("a", MaxOutputBytes) {
+		t.Errorf("content is not the first %d bytes of the line", MaxOutputBytes)
+	}
+}
+
+func TestReadFileRefusesCredentialFile(t *testing.T) {
+	const refusal = "refusing to read the ds-mcp credential file"
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	configDir := filepath.Join(home, ".config", "ds-mcp")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", configDir, err)
+	}
+	credentialPath := filepath.Join(configDir, "auth.json")
+	if err := os.WriteFile(credentialPath, []byte(`{"api_key":"sk-test-secret"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", credentialPath, err)
+	}
+
+	if _, err := ReadFile(context.Background(), t.TempDir(), credentialPath); err == nil || !strings.Contains(err.Error(), refusal) {
+		t.Fatalf("ReadFile() error = %v, want error containing %q", err, refusal)
+	}
+
+	linkDir := t.TempDir()
+	if err := os.Symlink(credentialPath, filepath.Join(linkDir, "link.json")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	if _, err := ReadFile(context.Background(), linkDir, "link.json"); err == nil || !strings.Contains(err.Error(), refusal) {
+		t.Fatalf("ReadFile() symlink error = %v, want error containing %q", err, refusal)
+	}
+
+	otherPath := filepath.Join(configDir, "notes.txt")
+	if err := os.WriteFile(otherPath, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", otherPath, err)
+	}
+	got, err := ReadFile(context.Background(), home, filepath.Join(".config", "ds-mcp", "notes.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() unrelated file error = %v", err)
+	}
+	if got != "ok" {
+		t.Errorf("ReadFile() unrelated file = %q, want %q", got, "ok")
+	}
 }
 
 func TestWriteFile(t *testing.T) {

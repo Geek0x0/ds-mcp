@@ -262,6 +262,40 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 	}
 }
 
+func TestRunnerPassesReasoningBackInHistory(t *testing.T) {
+	call := toolCall("call-1", "shell", `{"command":"echo hi"}`)
+	client := &stubClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{Reasoning: "plan A", ToolCalls: []openai.ToolCall{call}}},
+		{result: &deepseek.TurnResult{Content: "done"}},
+	}}
+	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
+	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+
+	if _, err := runner.Run(context.Background(), session, "use a tool"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	requests := client.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+
+	var assistant *openai.ChatCompletionMessage
+	for i := range requests[1].Messages {
+		message := &requests[1].Messages[i]
+		if message.Role == openai.ChatMessageRoleAssistant && len(message.ToolCalls) > 0 {
+			assistant = message
+			break
+		}
+	}
+	if assistant == nil {
+		t.Fatalf("no assistant message carrying a tool call in %#v", requests[1].Messages)
+	}
+	if assistant.ReasoningContent != "plan A" {
+		t.Fatalf("assistant ReasoningContent = %q, want %q", assistant.ReasoningContent, "plan A")
+	}
+}
+
 func TestRunnerEmptyFileResultHasNonEmptyToolContent(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "empty.txt"), nil, 0o644); err != nil {
@@ -582,6 +616,80 @@ func TestManagerReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestManagerEvictsIdleSessions(t *testing.T) {
+	manager := NewManager()
+	idle := manager.Create(Options{})
+	idle.lastUsed = time.Now().Add(-25 * time.Hour)
+	fresh := manager.Create(Options{})
+
+	if got, ok := manager.Get(idle.ID); ok || got != nil {
+		t.Fatalf("Get(idle.ID) = (%#v, %v), want (nil, false)", got, ok)
+	}
+	if got, ok := manager.Get(fresh.ID); !ok || got != fresh {
+		t.Fatalf("Get(fresh.ID) = (%#v, %v), want fresh session", got, ok)
+	}
+}
+
+func TestManagerKeepsBusySessions(t *testing.T) {
+	manager := NewManager()
+	busy := manager.Create(Options{})
+	busy.lastUsed = time.Now().Add(-25 * time.Hour)
+	busy.mu.Lock()
+	defer busy.mu.Unlock()
+
+	fresh := manager.Create(Options{})
+
+	if got, ok := manager.Get(busy.ID); !ok || got != busy {
+		t.Fatalf("Get(busy.ID) = (%#v, %v), want busy session", got, ok)
+	}
+	if got, ok := manager.Get(fresh.ID); !ok || got != fresh {
+		t.Fatalf("Get(fresh.ID) = (%#v, %v), want fresh session", got, ok)
+	}
+}
+
+func TestManagerCapsSessionCount(t *testing.T) {
+	manager := NewManager()
+	current := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return current }
+
+	sessions := make([]*Session, 0, maxSessions)
+	for i := 0; i < maxSessions; i++ {
+		sessions = append(sessions, manager.Create(Options{}))
+		current = current.Add(time.Minute)
+	}
+	newest := manager.Create(Options{})
+
+	manager.mu.Lock()
+	count := len(manager.sessions)
+	manager.mu.Unlock()
+	if count != maxSessions {
+		t.Fatalf("session count = %d, want %d", count, maxSessions)
+	}
+	if got, ok := manager.Get(sessions[0].ID); ok || got != nil {
+		t.Fatalf("Get(oldest.ID) = (%#v, %v), want (nil, false)", got, ok)
+	}
+	if got, ok := manager.Get(sessions[1].ID); !ok || got != sessions[1] {
+		t.Fatalf("Get(secondOldest.ID) = (%#v, %v), want it present", got, ok)
+	}
+	if got, ok := manager.Get(newest.ID); !ok || got != newest {
+		t.Fatalf("Get(newest.ID) = (%#v, %v), want it present", got, ok)
+	}
+}
+
+func TestRunnerUpdatesLastUsed(t *testing.T) {
+	client := &stubClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "done"}}}}
+	session := newTestSession(t, Options{})
+	runner := &Runner{Client: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+
+	before := time.Now()
+	if _, err := runner.Run(context.Background(), session, "finish the task"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !session.lastUsed.After(before) {
+		t.Fatalf("session.lastUsed = %v, want after %v", session.lastUsed, before)
+	}
+}
+
 func TestRunnerClientErrorPreservesSessionAndUnlocks(t *testing.T) {
 	client := &stubClient{turns: []stubTurn{
 		{err: errors.New("upstream failed")},
@@ -697,6 +805,16 @@ func TestBuiltinTools(t *testing.T) {
 			timeout := schema.Properties["timeout_seconds"]
 			if timeout.Type != "integer" || !strings.Contains(timeout.Description, "clamped, max 600") {
 				t.Errorf("shell timeout_seconds = %#v", timeout)
+			}
+		}
+		if definition.Name == "read_file" {
+			offset := schema.Properties["offset"]
+			if offset.Type != "integer" || !strings.Contains(offset.Description, "1-based") {
+				t.Errorf("read_file offset = %#v", offset)
+			}
+			limit := schema.Properties["limit"]
+			if limit.Type != "integer" || !strings.Contains(limit.Description, "lines") {
+				t.Errorf("read_file limit = %#v", limit)
 			}
 		}
 	}

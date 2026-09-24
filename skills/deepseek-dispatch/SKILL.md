@@ -11,7 +11,7 @@ Call `deepseek` for a new, independent work unit. Start a new session whenever t
 
 Call `deepseek-reply` for another step in the same task: answer a question from the agent, clarify or correct its work, provide test-failure output, or request another verification pass. A reply accepts only `threadId` and `prompt`; the original settings carry over unchanged and the accumulated conversation history is reused.
 
-A `busy` error means another call is already processing that thread. Wait for that call to finish, then retry the reply; use a new session only if the work is genuinely independent. An `unknown threadId` error means the server has no session with that ID, commonly because the ID is wrong or the server restarted. Check the ID, or start a new `deepseek` session if the original session is no longer in memory.
+A `busy` error means another call is already processing that thread. Wait for that call to finish, then retry the reply; use a new session only if the work is genuinely independent. An `unknown threadId` error means the server has no session with that ID, commonly because the ID is wrong or the server restarted. Check the ID, or start a new `deepseek` session if the original session is no longer in memory. Idle threads are evicted after 24 hours, and when more than 256 sessions exist the least recently used idle ones are evicted; an evicted `threadId` returns `unknown threadId` just like a server restart. Callers can also cancel a running call with standard MCP cancellation; the call returns an error and the thread stays resumable with `deepseek-reply`.
 
 ## threadId
 
@@ -25,11 +25,13 @@ Choose the narrowest sandbox that permits the task:
 
 - `read-only` (default) permits `read_file` and the policy's shell-command allowlist. Other operations fall outside the sandbox. Auto-allowed shell commands run with no writable roots.
 - `workspace-write` permits `read_file`, all `shell` calls, and `write_file` when its resolved path stays inside `cwd`. A `write_file` path containing `..` or escaping through a symlink is outside the sandbox. Auto-allowed shell commands are wrapped in a Landlock ruleset whose writable roots are `cwd`, `/tmp`, `$TMPDIR`, and any `config.writable_roots` entries; writes anywhere else fail with `Permission denied` instead of being heuristically detected. Tools that write caches under `$HOME` (for example `go test` writing `~/.cache/go-build`) need that directory listed in `config.writable_roots`.
-
-In both wrapped modes `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty` stay writable; the rest of `/dev`, including `/dev/shm`, does not.
 - `danger-full-access` treats every built-in tool operation as inside the sandbox and runs shell commands without the kernel wrapper.
 
+In both wrapped modes `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty` stay writable; the rest of `/dev`, including `/dev/shm`, does not.
+
 The shell-command allowlist contains `ls`, `cat`, `head`, `tail`, `rg`, `grep`, `find`, `pwd`, `wc`, `stat`, `which`, and `echo`, plus `git status`, `git diff`, `git log`, `git show`, `git branch`, `git blame`, `git rev-parse`, and `git ls-files`.
+
+`read_file` accepts optional `offset` (1-based start line) and `limit` (line count) arguments so large files can be read in slices.
 
 `apply_patch` is treated as one `write_file` request per touched path, and a denial on any path denies the whole patch; all approval-requiring paths are combined into a single approval request.
 
@@ -68,6 +70,8 @@ While a call runs, the server sends `deepseek/event` notifications containing th
 - `error`: the call failed, with the failure text in `message`.
 
 Policy denials and rejected approval requests are returned to the model as tool results; a tool that never begins execution does not emit the begin/end pair.
+
+When a `tools/call` includes `_meta.progressToken`, the server also sends standard `notifications/progress` notifications (a rising `progress` value plus a short `message` such as `started`, `shell: <cmd>`, `completed`, or `error: <msg>`); the `deepseek/event` notifications are unchanged.
 
 ## Rollout files
 

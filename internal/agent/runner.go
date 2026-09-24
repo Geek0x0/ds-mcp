@@ -77,6 +77,8 @@ func builtinTools() []openai.Tool {
 					"type": "object",
 					"properties": {
 						"path": {"type": "string", "description": "File path to read."},
+						"offset": {"type": "integer", "description": "1-based line number to start reading from; defaults to 1"},
+						"limit": {"type": "integer", "description": "maximum number of lines to return; defaults to all that fit in the 16 KiB output cap"},
 						"justification": {"type": "string", "description": "Why this call is needed if approval is required."}
 					},
 					"required": ["path"]
@@ -128,6 +130,7 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		return "", ErrBusy
 	}
 	defer s.mu.Unlock()
+	defer func() { s.lastUsed = time.Now() }()
 
 	r.Emitter.Emit(ctx, s.ID, map[string]any{"type": "task_started"})
 	started := time.Now()
@@ -173,9 +176,10 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 		recordModelTurn(s, res)
 
 		s.messages = append(s.messages, openai.ChatCompletionMessage{
-			Role:      openai.ChatMessageRoleAssistant,
-			Content:   res.Content,
-			ToolCalls: res.ToolCalls,
+			Role:             openai.ChatMessageRoleAssistant,
+			Content:          res.Content,
+			ReasoningContent: res.Reasoning,
+			ToolCalls:        res.ToolCalls,
 		})
 		if len(res.ToolCalls) == 0 {
 			r.Emitter.Emit(ctx, s.ID, map[string]any{
@@ -226,6 +230,8 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		Command        string `json:"command"`
 		TimeoutSeconds int    `json:"timeout_seconds"`
 		Path           string `json:"path"`
+		Offset         int    `json:"offset"`
+		Limit          int    `json:"limit"`
 		Content        string `json:"content"`
 		Patch          string `json:"patch"`
 		Justification  string `json:"justification"`
@@ -307,7 +313,7 @@ func (r *Runner) execToolCall(ctx context.Context, s *Session, toolCall openai.T
 		return result
 
 	case "read_file":
-		content, err := tools.ReadFile(ctx, s.cwd, args.Path)
+		content, err := tools.ReadFileRange(ctx, s.cwd, args.Path, args.Offset, args.Limit)
 		toolErr = err
 
 		if err != nil {

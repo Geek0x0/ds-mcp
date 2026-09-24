@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Geek0x0/ds-mcp/internal/agent"
 	"github.com/Geek0x0/ds-mcp/internal/deepseek"
@@ -585,6 +586,119 @@ func TestHandleReplyBusy(t *testing.T) {
 	}
 }
 
+func TestCancelledNotificationStopsRunningCall(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{name: "numeric id", id: "7"},
+		{name: "string id", id: `"req-7"`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			unblock := make(chan struct{})
+			var unblockOnce sync.Once
+			t.Cleanup(func() { unblockOnce.Do(func() { close(unblock) }) })
+
+			entered := make(chan struct{}, 1)
+			client := &stubChatClient{block: unblock, entered: entered}
+			s := New(client, "test")
+
+			rawCall := fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"deepseek","arguments":{"prompt":"hello","cwd":%q,"approval-policy":"never"}}}`,
+				test.id,
+				t.TempDir(),
+			)
+			responses := make(chan mcp.JSONRPCMessage, 1)
+			go func() {
+				responses <- s.mcp.HandleMessage(context.Background(), json.RawMessage(rawCall))
+			}()
+
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("deepseek call did not reach the blocked client")
+			}
+
+			rawCancel := fmt.Sprintf(
+				`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":%s,"reason":"user pressed escape"}}`,
+				test.id,
+			)
+			if response := s.mcp.HandleMessage(context.Background(), json.RawMessage(rawCancel)); response != nil {
+				t.Fatalf("cancelled notification returned a response: %#v", response)
+			}
+
+			var message mcp.JSONRPCMessage
+			select {
+			case message = <-responses:
+			case <-time.After(2 * time.Second):
+				t.Fatal("cancelled deepseek call did not return")
+			}
+			response, ok := message.(mcp.JSONRPCResponse)
+			if !ok {
+				t.Fatalf("tools/call response = %#v, want mcp.JSONRPCResponse", message)
+			}
+			result, ok := response.Result.(*mcp.CallToolResult)
+			if !ok {
+				t.Fatalf("tools/call result = %#v, want *mcp.CallToolResult", response.Result)
+			}
+			if text := toolResultText(t, result); !strings.Contains(text, "context canceled") {
+				t.Fatalf("cancelled result text = %q, want it to contain %q", text, "context canceled")
+			}
+			threadID := toolResultThreadID(t, result)
+
+			client.mu.Lock()
+			client.block = nil
+			client.turns = []stubTurn{{result: &deepseek.TurnResult{Content: "recovered"}}}
+			client.mu.Unlock()
+			reply, err := s.handleReply(context.Background(), callToolRequest("deepseek-reply", map[string]any{
+				"threadId": threadID,
+				"prompt":   "continue after cancellation",
+			}))
+			if err != nil {
+				t.Fatalf("handleReply() Go error = %v, want nil", err)
+			}
+			if reply.IsError {
+				t.Fatalf("handleReply() after cancel = %#v, want success (thread still busy?)", reply)
+			}
+			if text := toolResultText(t, reply); text != "recovered" {
+				t.Fatalf("handleReply() text = %q, want %q", text, "recovered")
+			}
+		})
+	}
+}
+
+func TestCancelledNotificationUnknownIDIsIgnored(t *testing.T) {
+	client := &stubChatClient{turns: []stubTurn{{result: &deepseek.TurnResult{Content: "ok"}}}}
+	s := New(client, "test")
+
+	for _, raw := range []string{
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"no-such-call","reason":"stale"}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":41,"reason":"stale"}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":{"unexpected":true}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}`,
+	} {
+		if response := s.mcp.HandleMessage(context.Background(), json.RawMessage(raw)); response != nil {
+			t.Fatalf("cancelled notification %s returned a response: %#v", raw, response)
+		}
+	}
+
+	result, err := s.handleDeepseek(context.Background(), callToolRequest("deepseek", map[string]any{
+		"prompt": "hello",
+		"cwd":    t.TempDir(),
+	}))
+	if err != nil {
+		t.Fatalf("handleDeepseek() Go error = %v, want nil", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleDeepseek() result = %#v, want success", result)
+	}
+	if text := toolResultText(t, result); text != "ok" {
+		t.Fatalf("handleDeepseek() text = %q, want %q", text, "ok")
+	}
+}
+
 func TestHandleDeepseekTurnLimitPreservesThreadID(t *testing.T) {
 	client := &stubChatClient{repeat: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{
 		toolCall("call-forever", "unknown_tool", `{}`),
@@ -744,6 +858,175 @@ func TestEmitWithoutClientReturnsPromptly(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Emit() blocked without an active MCP client")
+	}
+}
+
+// runScriptedDeepseekCall drives one real tools/call through the MCP server
+// with a scripted shell call followed by a two-line completion, and returns the
+// notifications the session received. meta, when non-nil, is sent as the
+// params._meta of the tools/call request.
+func runScriptedDeepseekCall(
+	t *testing.T,
+	s *Server,
+	session *fakeElicitationSession,
+	meta map[string]any,
+) []mcp.JSONRPCNotification {
+	t.Helper()
+
+	params := map[string]any{
+		"name": "deepseek",
+		"arguments": map[string]any{
+			"prompt":          "hello",
+			"cwd":             t.TempDir(),
+			"sandbox":         "danger-full-access",
+			"approval-policy": "never",
+		},
+	}
+	if meta != nil {
+		params["_meta"] = meta
+	}
+	rawCall, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params":  params,
+	})
+	if err != nil {
+		t.Fatalf("marshal tools/call: %v", err)
+	}
+
+	ctx := s.mcp.WithContext(context.Background(), session)
+	message := s.mcp.HandleMessage(ctx, rawCall)
+	response, ok := message.(mcp.JSONRPCResponse)
+	if !ok {
+		t.Fatalf("tools/call response = %#v, want mcp.JSONRPCResponse", message)
+	}
+	result, ok := response.Result.(*mcp.CallToolResult)
+	if !ok {
+		t.Fatalf("tools/call result = %#v, want *mcp.CallToolResult", response.Result)
+	}
+	if result.IsError {
+		t.Fatalf("tools/call result = %#v, want success", result)
+	}
+	if text := toolResultText(t, result); text != "line one\nline two" {
+		t.Fatalf("tools/call text = %q, want %q", text, "line one\nline two")
+	}
+
+	var notifications []mcp.JSONRPCNotification
+	for len(session.notifications) > 0 {
+		notifications = append(notifications, <-session.notifications)
+	}
+	return notifications
+}
+
+func deepseekEventType(t *testing.T, notification mcp.JSONRPCNotification) string {
+	t.Helper()
+	msg, ok := notification.Params.AdditionalFields["msg"].(map[string]any)
+	if !ok {
+		t.Fatalf("deepseek/event msg = %#v, want map[string]any", notification.Params.AdditionalFields["msg"])
+	}
+	eventType, _ := msg["type"].(string)
+	return eventType
+}
+
+func TestProgressNotificationsWithToken(t *testing.T) {
+	t.Setenv("DS_MCP_ROLLOUT", "off")
+
+	client := &stubChatClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{
+			toolCall("call-shell", "shell", `{"command":"echo hi"}`),
+		}}},
+		{result: &deepseek.TurnResult{Content: "line one\nline two"}},
+	}}
+	s := New(client, "test")
+	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
+
+	notifications := runScriptedDeepseekCall(t, s, session, map[string]any{"progressToken": "tok-1"})
+
+	var progressNotifications []mcp.JSONRPCNotification
+	var eventTypes []string
+	for _, notification := range notifications {
+		switch notification.Method {
+		case "notifications/progress":
+			progressNotifications = append(progressNotifications, notification)
+		case "deepseek/event":
+			eventTypes = append(eventTypes, deepseekEventType(t, notification))
+		}
+	}
+
+	wantEvents := []string{"task_started", "exec_command_begin", "exec_command_end", "agent_message", "task_complete"}
+	if !reflect.DeepEqual(eventTypes, wantEvents) {
+		t.Fatalf("deepseek/event types = %v, want %v", eventTypes, wantEvents)
+	}
+
+	wantMessages := []string{"started", "shell: echo hi", "agent: line one", "completed"}
+	if len(progressNotifications) != len(wantMessages) {
+		t.Fatalf("progress notification count = %d, want %d", len(progressNotifications), len(wantMessages))
+	}
+	for i, notification := range progressNotifications {
+		fields := notification.Params.AdditionalFields
+		if got := fields["progressToken"]; got != "tok-1" {
+			t.Errorf("progress notification %d token = %#v, want %q", i, got, "tok-1")
+		}
+		if got := fields["message"]; got != wantMessages[i] {
+			t.Errorf("progress notification %d message = %#v, want %q", i, got, wantMessages[i])
+		}
+		if got, ok := fields["progress"].(float64); !ok || got != float64(i+1) {
+			t.Errorf("progress notification %d progress = %#v, want %d", i, fields["progress"], i+1)
+		}
+		if _, ok := fields["total"]; ok {
+			t.Errorf("progress notification %d includes total: %#v", i, fields)
+		}
+	}
+}
+
+func TestNoProgressNotificationsWithoutToken(t *testing.T) {
+	t.Setenv("DS_MCP_ROLLOUT", "off")
+
+	client := &stubChatClient{turns: []stubTurn{
+		{result: &deepseek.TurnResult{ToolCalls: []openai.ToolCall{
+			toolCall("call-shell", "shell", `{"command":"echo hi"}`),
+		}}},
+		{result: &deepseek.TurnResult{Content: "line one\nline two"}},
+	}}
+	s := New(client, "test")
+	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
+
+	notifications := runScriptedDeepseekCall(t, s, session, nil)
+
+	progressCount := 0
+	eventCount := 0
+	for _, notification := range notifications {
+		switch notification.Method {
+		case "notifications/progress":
+			progressCount++
+		case "deepseek/event":
+			eventCount++
+		}
+	}
+	if progressCount != 0 {
+		t.Fatalf("progress notification count = %d, want 0", progressCount)
+	}
+	if eventCount != 5 {
+		t.Fatalf("deepseek/event count = %d, want 5", eventCount)
+	}
+}
+
+func TestProgressSummaryTruncation(t *testing.T) {
+	summary, ok := progressSummary("exec_command_begin", map[string]any{
+		"command": strings.Repeat("é", 300),
+	})
+	if !ok {
+		t.Fatal("progressSummary() ok = false, want true")
+	}
+	if !utf8.ValidString(summary) {
+		t.Fatalf("progressSummary() = %q, want valid UTF-8", summary)
+	}
+	if got := utf8.RuneCountInString(summary); got != 201 {
+		t.Fatalf("progressSummary() rune count = %d, want 201", got)
+	}
+	if !strings.HasSuffix(summary, "…") {
+		t.Fatalf("progressSummary() = %q, want it to end with an ellipsis", summary)
 	}
 }
 

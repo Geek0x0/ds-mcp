@@ -7,6 +7,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/Geek0x0/ds-mcp/internal/agent"
@@ -18,7 +21,78 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-const maxConfiguredTurns = 100000
+const (
+	maxConfiguredTurns = 100000
+
+	// requestIDMetaKey is the _meta field the before-call-tool hook uses to hand
+	// the JSON-RPC request ID to the tool handlers, which cannot see it otherwise.
+	requestIDMetaKey = "ds-mcp/requestId"
+
+	// cancelledNotificationMethod is the MCP notification clients send when they
+	// abandon an in-flight request, for example when the user presses Esc.
+	cancelledNotificationMethod = "notifications/cancelled"
+
+	// progressSummaryLimit is the maximum number of runes a
+	// notifications/progress message carries before it is truncated.
+	progressSummaryLimit = 200
+)
+
+// progressContextKey keys the per-call MCP progress state in a tool-call
+// context. The state is only attached when the request opted in with a
+// progress token.
+type progressContextKey struct{}
+
+// progressState tracks how many progress notifications a call has sent.
+type progressState struct {
+	token mcp.ProgressToken
+
+	mu    sync.Mutex
+	count int
+}
+
+func (p *progressState) next() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.count++
+	return float64(p.count)
+}
+
+// canonicalRequestID returns a stable map key for a JSON-RPC request ID so the
+// before-call-tool hook and notifications/cancelled agree on the same value for
+// both numeric and string IDs. JSON numbers decode as float64 in both places,
+// so integral floats are keyed as integers.
+func canonicalRequestID(value any) (string, bool) {
+	switch v := value.(type) {
+	case mcp.RequestId:
+		return canonicalRequestID(v.Value())
+	case string:
+		return "string:" + v, true
+	case float64:
+		if v == float64(int64(v)) {
+			return "int64:" + strconv.FormatInt(int64(v), 10), true
+		}
+		return "float64:" + strconv.FormatFloat(v, 'f', -1, 64), true
+	case int64:
+		return "int64:" + strconv.FormatInt(v, 10), true
+	case int:
+		return "int64:" + strconv.FormatInt(int64(v), 10), true
+	default:
+		return "", false
+	}
+}
+
+// requestIDFromMeta returns the canonical request key stored by the
+// before-call-tool hook, or false when the request has none.
+func requestIDFromMeta(req mcp.CallToolRequest) (string, bool) {
+	if req.Params.Meta == nil {
+		return "", false
+	}
+	key, ok := req.Params.Meta.AdditionalFields[requestIDMetaKey].(string)
+	if !ok || key == "" {
+		return "", false
+	}
+	return key, true
+}
 
 var reasoningEfforts = map[string]string{
 	"low":    "low",
@@ -88,16 +162,39 @@ type Server struct {
 	mgr     *agent.Manager
 	runner  *agent.Runner
 	version string
+
+	callsMu sync.Mutex
+	calls   map[string]context.CancelFunc
 }
 
 func New(client agent.ChatClient, version string) *Server {
-	s := &Server{mgr: agent.NewManager(), version: version}
+	s := &Server{
+		mgr:     agent.NewManager(),
+		version: version,
+		calls:   make(map[string]context.CancelFunc),
+	}
+	hooks := &mcpserver.Hooks{}
+	hooks.AddBeforeCallTool(func(_ context.Context, id any, request *mcp.CallToolRequest) {
+		key, ok := canonicalRequestID(id)
+		if !ok {
+			return
+		}
+		if request.Params.Meta == nil {
+			request.Params.Meta = &mcp.Meta{}
+		}
+		if request.Params.Meta.AdditionalFields == nil {
+			request.Params.Meta.AdditionalFields = make(map[string]any)
+		}
+		request.Params.Meta.AdditionalFields[requestIDMetaKey] = key
+	})
 	s.mcp = mcpserver.NewMCPServer(
 		"ds-mcp",
 		version,
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithRecovery(),
+		mcpserver.WithHooks(hooks),
 	)
+	s.mcp.AddNotificationHandler(cancelledNotificationMethod, s.handleCancelledNotification)
 	s.runner = &agent.Runner{Client: client, Emitter: s, Approver: s}
 	s.mcp.AddTool(deepseekTool(), s.handleDeepseek)
 	s.mcp.AddTool(replyTool(), s.handleReply)
@@ -105,7 +202,54 @@ func New(client agent.ChatClient, version string) *Server {
 }
 
 func (s *Server) ServeStdio() error {
-	return mcpserver.ServeStdio(s.mcp)
+	return mcpserver.ServeStdio(s.mcp, mcpserver.WithWorkerPoolSize(32))
+}
+
+// beginCall derives a cancellable context for an in-flight tool call and
+// registers its cancel function under the JSON-RPC request ID recorded by the
+// before-call-tool hook. The returned stop function unregisters the call and
+// releases the context; when the request has no ID, only cancellation applies.
+func (s *Server) beginCall(ctx context.Context, req mcp.CallToolRequest) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if req.Params.Meta != nil && req.Params.Meta.ProgressToken != nil {
+		ctx = context.WithValue(ctx, progressContextKey{}, &progressState{token: req.Params.Meta.ProgressToken})
+	}
+	key, ok := requestIDFromMeta(req)
+	if !ok {
+		return ctx, cancel
+	}
+
+	s.callsMu.Lock()
+	s.calls[key] = cancel
+	s.callsMu.Unlock()
+
+	return ctx, func() {
+		s.callsMu.Lock()
+		delete(s.calls, key)
+		s.callsMu.Unlock()
+		cancel()
+	}
+}
+
+// handleCancelledNotification cancels the in-flight call matching the
+// requestId of a notifications/cancelled message. Unknown or malformed IDs are
+// ignored.
+func (s *Server) handleCancelledNotification(_ context.Context, notification mcp.JSONRPCNotification) {
+	raw, ok := notification.Params.AdditionalFields["requestId"]
+	if !ok {
+		return
+	}
+	key, ok := canonicalRequestID(raw)
+	if !ok {
+		return
+	}
+
+	s.callsMu.Lock()
+	cancel := s.calls[key]
+	s.callsMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 type toolOutput struct {
@@ -177,6 +321,9 @@ func replyTool() mcp.Tool {
 }
 
 func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, endCall := s.beginCall(ctx, req)
+	defer endCall()
+
 	prompt, err := req.RequireString("prompt")
 	if err != nil {
 		return mcp.NewToolResultError("prompt is required: " + err.Error()), nil
@@ -298,6 +445,9 @@ func (s *Server) handleDeepseek(ctx context.Context, req mcp.CallToolRequest) (*
 }
 
 func (s *Server) handleReply(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, endCall := s.beginCall(ctx, req)
+	defer endCall()
+
 	threadID, err := req.RequireString("threadId")
 	if err != nil {
 		return mcp.NewToolResultError("threadId is required: " + err.Error()), nil
@@ -343,6 +493,65 @@ func (s *Server) Emit(ctx context.Context, threadID string, msg map[string]any) 
 	}); err != nil {
 		log.Printf("deepseek/event emit failed: %v", err)
 	}
+
+	state, ok := ctx.Value(progressContextKey{}).(*progressState)
+	if !ok {
+		return
+	}
+	event, _ := msg["type"].(string)
+	summary, ok := progressSummary(event, msg)
+	if !ok {
+		return
+	}
+	if err := s.mcp.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
+		"progressToken": state.token,
+		"progress":      state.next(),
+		"message":       summary,
+	}); err != nil {
+		log.Printf("notifications/progress emit failed: %v", err)
+	}
+}
+
+// progressSummary returns the short notifications/progress message for a runner
+// event, or false for events clients should not see progress for.
+func progressSummary(event string, msg map[string]any) (string, bool) {
+	switch event {
+	case "task_started":
+		return "started", true
+	case "exec_command_begin":
+		if command, _ := msg["command"].(string); command != "" {
+			return truncateProgressSummary("shell: " + command), true
+		}
+		if paths, ok := msg["paths"].([]string); ok {
+			return truncateProgressSummary("apply_patch: " + strings.Join(paths, ", ")), true
+		}
+		tool, _ := msg["tool"].(string)
+		path, _ := msg["path"].(string)
+		return truncateProgressSummary(tool + ": " + path), true
+	case "agent_message":
+		message, _ := msg["message"].(string)
+		if firstLine, _, found := strings.Cut(message, "\n"); found {
+			message = firstLine
+		}
+		return truncateProgressSummary("agent: " + message), true
+	case "task_complete":
+		return "completed", true
+	case "error":
+		message, _ := msg["message"].(string)
+		return truncateProgressSummary("error: " + message), true
+	default:
+		return "", false
+	}
+}
+
+// truncateProgressSummary caps a summary at progressSummaryLimit runes and
+// appends an ellipsis when cut, without splitting a UTF-8 character.
+func truncateProgressSummary(summary string) string {
+	runes := []rune(summary)
+	if len(runes) <= progressSummaryLimit {
+		return summary
+	}
+	return string(runes[:progressSummaryLimit]) + "…"
 }
 
 func (s *Server) Approve(ctx context.Context, threadID string, req agent.ApprovalRequest) bool {

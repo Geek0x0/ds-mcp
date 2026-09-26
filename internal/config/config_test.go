@@ -207,22 +207,7 @@ func TestValidEffort(t *testing.T) {
 }
 
 func TestExampleConfigLoads(t *testing.T) {
-	// config.example.toml still carries the legacy active_provider key until a
-	// later work unit removes it; strip that key here so the rest of the
-	// example loads under the name-keyed config (strict decoding rejects the
-	// removed field).
-	data, err := os.ReadFile("../../config.example.toml")
-	if err != nil {
-		t.Fatalf("read config.example.toml: %v", err)
-	}
-	var lines []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "active_provider") {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	cfg, err := Load(writeConfig(t, strings.Join(lines, "\n")))
+	cfg, err := Load("../../config.example.toml")
 	if err != nil {
 		t.Fatalf("config.example.toml does not load: %v", err)
 	}

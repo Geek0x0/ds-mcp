@@ -1,9 +1,8 @@
 # subagent-mcp configuration.
 # Copy to ~/.config/subagent-mcp/config.toml (or point SUBAGENT_MCP_CONFIG at it).
 # API keys are never stored here: env_key names the environment variable that holds each key.
-# Switch providers by changing active_provider and reconnecting the MCP server.
-
-active_provider = "deepseek"
+# The caller selects which provider a session uses via the start tool's
+# `provider` argument; omit it when only one provider is configured below.
 
 # chat-completions: OpenAI Chat Completions streaming (DeepSeek and other compatible endpoints).
 [providers.deepseek]

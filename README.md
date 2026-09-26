@@ -1,6 +1,6 @@
 # subagent-mcp
 
-subagent-mcp is one MCP server binary that exposes a coding agent — real shell and file-tool execution, a Landlock write sandbox, approvals, rollout files, cancellation, and progress notifications — driven by any of three model API families. The provider is chosen by a TOML config file, not by the MCP caller.
+subagent-mcp is one MCP server binary that exposes a coding agent — real shell and file-tool execution, a Landlock write sandbox, approvals, rollout files, cancellation, and progress notifications — driven by any of three model API families. The MCP caller selects which configured provider a session uses via the `provider` argument.
 
 | `api` value | Wire protocol | Example providers |
 |---|---|---|
@@ -42,12 +42,12 @@ subagent-mcp is one MCP server binary that exposes a coding agent — real shell
    claude plugin install subagent@subagent-mcp
    ```
 
-4. Create the config file and provide the active provider's key in the environment that launches the MCP server:
+4. Create the config file and provide each provider's key you plan to use in the environment that launches the MCP server:
 
    ```bash
    mkdir -p ~/.config/subagent-mcp
    cp config.example.toml ~/.config/subagent-mcp/config.toml
-   export DEEPSEEK_API_KEY=...   # the variable named by the active provider's env_key
+   export DEEPSEEK_API_KEY=...   # the variable named by that provider's env_key
    ```
 
    Restart or reconnect the MCP server after changing the config, then run `/subagent:setup` to verify the binary, the config file, and the key.
@@ -57,8 +57,6 @@ subagent-mcp is one MCP server binary that exposes a coding agent — real shell
 The TOML file is loaded once at startup from `$SUBAGENT_MCP_CONFIG`, or from `~/.config/subagent-mcp/config.toml` when that variable is unset. A missing file fails startup with a message naming the path and pointing at `config.example.toml`; the repository's `config.example.toml` has a ready-to-edit deepseek/openai/anthropic setup. Decoding is strict, so a typo is an error rather than a silently ignored key, and every validation error names the offending field path (for example `providers.openai.default_model`).
 
 ```toml
-active_provider = "deepseek"
-
 [providers.deepseek]
 api = "chat-completions"
 base_url = "https://api.deepseek.com"
@@ -88,10 +86,9 @@ models = [{ id = "claude-sonnet-5" }, { id = "claude-opus-5" }]
 
 | Field | Level | Required | Rules |
 |---|---|---|---|
-| `active_provider` | top | yes | Must name a provider defined under `[providers]`. |
 | `api` | provider | yes | One of `chat-completions`, `responses`, `messages`. |
 | `base_url` | provider | no | Defaults per api: `https://api.openai.com/v1` for `chat-completions` and `responses`, `https://api.anthropic.com` for `messages`. |
-| `env_key` | provider | yes | Name of the environment variable holding the key. Its value is required only for the active provider; a missing value fails startup naming the variable and `providers.<name>.env_key`. |
+| `env_key` | provider | yes | Name of the environment variable holding the key. Its value is read when a session is created for that provider (via the `provider` argument, or the sole configured provider); a missing value fails that call naming the variable and `providers.<name>.env_key`. |
 | `default_model` | provider | yes | Must be one of `models[].id`. Used when a caller omits `model`. |
 | `models` | provider | yes | Non-empty list of `{ id, description? }` tables; ids must be unique and are advertised in config order. |
 | `effort_map` | provider | no | Maps a caller effort value to the value sent to the API: `effort_map[value]` if present, else the caller's value. Keys and values must be in the effort set below. |
@@ -99,15 +96,15 @@ models = [{ id = "claude-sonnet-5" }, { id = "claude-opus-5" }]
 
 ### Reasoning effort
 
-Accepted caller values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the default is `high`. The value sent to the provider is `effort_map[value]` when the active provider defines that mapping, otherwise the caller's value. The server validates against the seven values above and does not otherwise check provider-specific support, so an unsupported value surfaces as the provider's API error. `config.model_reasoning_effort` in the `config` object works like `reasoning-effort`, and the top-level argument wins.
+Accepted caller values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the default is `high`. The value sent to the provider is `effort_map[value]` when the selected provider defines that mapping, otherwise the caller's value. The server validates against the seven values above and does not otherwise check provider-specific support, so an unsupported value surfaces as the provider's API error. `config.model_reasoning_effort` in the `config` object works like `reasoning-effort`, and the top-level argument wins.
 
 ### API keys
 
-Keys are never stored in the config file. At startup the server reads the active provider's `env_key` variable from its own environment; every provider's `env_key` variable is also removed from shell commands run by the agent (see [Environment](#environment)). Keep the variable in the environment that launches the MCP server, for example in an MCP client's `env` block or your shell profile.
+Keys are never stored in the config file. When a session is created, the server reads the selected provider's `env_key` variable from its own environment; every provider's `env_key` variable is also removed from shell commands run by the agent (see [Environment](#environment)). Keep the variable in the environment that launches the MCP server, for example in an MCP client's `env` block or your shell profile.
 
-### Switching providers
+### Selecting a provider
 
-Edit `active_provider`, provide that provider's `env_key`, and reconnect the MCP server. The provider is fixed at startup: a session cannot switch provider mid-thread, and each call's `model` must come from the active provider's list.
+Pass `provider` when starting a session to choose which configured provider it uses; the tool schema's `enum` lists every name defined under `[providers]`. Omitting `provider` works only when the config defines exactly one provider — with two or more, omitting it is a tool error listing the available names. The chosen provider is fixed for the session's lifetime: `subagent-reply` always continues with the same one, and each call's `model` must come from that provider's list.
 
 ## Validating the config
 
@@ -118,19 +115,21 @@ subagent-mcp --check-config [path]
 subagent-mcp --check-config --live [path]
 ```
 
-The optional `path` defaults to `$SUBAGENT_MCP_CONFIG` or `~/.config/subagent-mcp/config.toml`. Flags must come before the path. The process exits 0 when no provider failed and 1 otherwise; a missing config, unknown TOML key, or invalid field is reported naming the path or field, and a missing key is a failure only for the active provider (other providers are skipped). Output looks like:
+The optional `path` defaults to `$SUBAGENT_MCP_CONFIG` or `~/.config/subagent-mcp/config.toml`. Flags must come before the path. The process exits 0 when no provider failed and 1 otherwise; a missing config, unknown TOML key, or invalid field is reported naming the path or field, and a missing key is always skipped — the overall result fails only when no configured provider has a key set, or a reachability/model check actually failed. Output looks like:
 
 ```
 config   /home/you/.config/subagent-mcp/config.toml   OK
 provider anthropic (messages)
   key    ANTHROPIC_API_KEY   not set, skipped
-provider deepseek (chat-completions, active)
+provider deepseek (chat-completions)
   key    DEEPSEEK_API_KEY   set
   api    https://api.deepseek.com   OK (2 models listed)
   model  deepseek-flash     OK
   model  deepseek-v4-pro     WARN: not in the provider's current model list
 result   PASS (1 checked, 1 skipped, 0 failed)
 ```
+
+If no configured provider has a key set, the result line instead reads `result   FAIL (0 checked, N skipped, 0 failed) — no configured provider has its key set`.
 
 `model ... WARN` means a configured model id is not in the provider's current list; it does not affect the exit code. `--live` is opt-in and makes one real, billed tool-call round trip per reachable provider using `default_model` and effort `low`, printing a warning first; use it deliberately, not in CI. Neither mode ever prints a key value, only the variable names.
 
@@ -153,7 +152,8 @@ Starts a new coding-agent thread.
 | Parameter | Required | Default | Description |
 |---|---:|---|---|
 | `prompt` | Yes | — | String task prompt for the new thread. |
-| `model` | No | Active provider's `default_model` | A model id from the active provider's `models` list; the tool schema's `enum` and description list them. An unknown value is a tool error listing the available ids. |
+| `provider` | No (required when 2+ providers are configured) | The sole configured provider | Name of a provider defined under `[providers]`; the tool schema's `enum` lists them. Required when the config defines more than one, otherwise optional. Fixed for the session's lifetime. |
+| `model` | No | Selected provider's `default_model` | A model id from the selected provider's `models` list; the tool schema's `enum` is the union of every configured provider's models, described grouped by provider. An unknown value is a tool error listing the selected provider's available ids. |
 | `reasoning-effort` | No | `high` | One of the seven effort values; mapped through the provider's `effort_map` before it is sent. This argument wins over `config.model_reasoning_effort`, and an invalid value from either source is an error. |
 | `cwd` | No | Server process working directory | Absolute path to an existing directory. |
 | `sandbox` | No | `read-only` | `read-only`, `workspace-write`, or `danger-full-access`. |
@@ -283,7 +283,7 @@ When a `tools/call` carries `_meta.progressToken`, the server additionally sends
 
 ## Rollout files
 
-Every session writes a Codex-compatible rollout as JSONL under `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDTHH-MM-SS>-<threadId>.jsonl`, using UTC and `~/.codex` when `CODEX_HOME` is unset. Directories are created `0700` and the file is `0600`. Each line is `{"timestamp": ..., "type": ..., "payload": {...}}` with the Codex line types `session_meta`, `turn_context`, `response_item`, and `event_msg`. Codex ecosystem tools can read these files for usage reporting, session viewing, and audit; `originator` is `subagent-mcp`, `model_provider` is the active provider's config name, `turn_context` records both the caller's `effort` and the mapped `effort_sent`, and `reasoning` items come from the provider's human-readable reasoning text and are omitted when empty. `session_meta` records the working directory, the full composed system prompt, and the Git branch and commit when `cwd` is in a repository. Replay payloads are never written. Because the files are written but never read back, these sessions are visible to `codex resume` but cannot actually be resumed by Codex.
+Every session writes a Codex-compatible rollout as JSONL under `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDTHH-MM-SS>-<threadId>.jsonl`, using UTC and `~/.codex` when `CODEX_HOME` is unset. Directories are created `0700` and the file is `0600`. Each line is `{"timestamp": ..., "type": ..., "payload": {...}}` with the Codex line types `session_meta`, `turn_context`, `response_item`, and `event_msg`. Codex ecosystem tools can read these files for usage reporting, session viewing, and audit; `originator` is `subagent-mcp`, `model_provider` is the selected provider's config name, `turn_context` records both the caller's `effort` and the mapped `effort_sent`, and `reasoning` items come from the provider's human-readable reasoning text and are omitted when empty. `session_meta` records the working directory, the full composed system prompt, and the Git branch and commit when `cwd` is in a repository. Replay payloads are never written. Because the files are written but never read back, these sessions are visible to `codex resume` but cannot actually be resumed by Codex.
 
 Set `SUBAGENT_MCP_ROLLOUT=off` to disable rollout writing. A rollout write or open failure logs one line to stderr and disables the rollout for that session; it never fails an agent run.
 

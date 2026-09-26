@@ -5,7 +5,7 @@ description: Dispatch coding work units to the subagent MCP tools (subagent / su
 
 # Subagent Dispatch
 
-The MCP tool names follow the server's `SUBAGENT_MCP_TOOL_NAME` environment variable, which defaults to `subagent`. The active model provider — DeepSeek over Chat Completions, OpenAI over Responses, or Anthropic over Messages — is chosen by the server's config file (`active_provider`), not by the caller. Changing provider means editing the config and reconnecting the server, never passing a provider argument.
+The MCP tool names follow the server's `SUBAGENT_MCP_TOOL_NAME` environment variable, which defaults to `subagent`. The server's config file can define more than one model provider (DeepSeek over Chat Completions, OpenAI over Responses, Anthropic over Messages, or others); the caller selects which one a session uses via the `provider` argument on the start tool.
 
 ## New session vs reply
 
@@ -23,7 +23,9 @@ Use the most recent returned ID with `subagent-reply`; the ID remains the same f
 
 ## Parameter selection
 
-`model` must be one of the ids in the active provider's `models` list, which is the `enum` of the tool schema. Omit it to use the provider's `default_model`. An unknown id is rejected with an error listing the available models; do not reuse a model name from a different provider.
+`model` must be one of the ids in the selected provider's `models` list; the tool schema's `enum` is the union of every configured provider's models. Omit it to use the selected provider's `default_model`. An unknown id is rejected with an error listing the available models; do not reuse a model name from a different provider.
+
+`provider` selects which configured provider a new session uses; the tool schema's `enum` lists every name defined under `[providers]`. Omit it only when the config defines exactly one provider — with two or more, omitting it is a tool error listing the available names, so pass the name the user (or the dispatch policy) selected before the first call of a new session. It is fixed for the session's lifetime; `subagent-reply` always continues with the same provider, and `model` must come from that provider's list.
 
 Choose the narrowest sandbox that permits the task:
 
@@ -54,7 +56,7 @@ Approval requests are sent to the MCP client. If approval elicitation is unavail
 
 `cwd` must be an absolute path to an existing directory; a Git worktree root is usually a sensible choice. If omitted, it defaults to the subagent-mcp process working directory.
 
-Use `reasoning-effort` to control reasoning depth. It accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` and defaults to `high`. The value is passed through the active provider's `effort_map` before it is sent (for example, the example DeepSeek provider maps `medium` to `high` and `xhigh` to `max`), so choose `low` for simple, fast tasks, `high` for typical work, and `xhigh` or `max` for the hardest multi-step or planning-heavy tasks. The top-level argument wins over `config.model_reasoning_effort`, and an invalid value from either source is an error.
+Use `reasoning-effort` to control reasoning depth. It accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` and defaults to `high`. The value is passed through the selected provider's `effort_map` before it is sent (for example, the example DeepSeek provider maps `medium` to `high` and `xhigh` to `max`), so choose `low` for simple, fast tasks, `high` for typical work, and `xhigh` or `max` for the hardest multi-step or planning-heavy tasks. The top-level argument wins over `config.model_reasoning_effort`, and an invalid value from either source is an error.
 
 The optional loose `config` object recognizes three keys. `max_turns` accepts a number from 1 through 100000 and overrides the default limit of 50 agent turns; unknown keys, values of the wrong type, and out-of-range values are silently ignored. `model_reasoning_effort` accepts the same values as `reasoning-effort` and is overridden by the top-level argument. `writable_roots` is an array of absolute paths to existing directories that the shell may also write under `workspace-write`. Invalid `model_reasoning_effort` or `writable_roots` values fail the call.
 

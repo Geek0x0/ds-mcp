@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -42,9 +43,8 @@ type Provider struct {
 
 // Config is the root of the configuration file.
 type Config struct {
-	Path           string              `toml:"-"`
-	ActiveProvider string              `toml:"active_provider"`
-	Providers      map[string]Provider `toml:"providers"`
+	Path      string              `toml:"-"`
+	Providers map[string]Provider `toml:"providers"`
 }
 
 // DefaultPath returns $SUBAGENT_MCP_CONFIG or ~/.config/subagent-mcp/config.toml.
@@ -103,13 +103,10 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate checks the active provider and every provider's fields.
+// Validate requires at least one provider and checks every provider's fields.
 func (c *Config) Validate() error {
-	if c.ActiveProvider == "" {
-		return errors.New("active_provider is required")
-	}
-	if _, ok := c.Providers[c.ActiveProvider]; !ok {
-		return fmt.Errorf("active_provider %q is not defined under [providers]", c.ActiveProvider)
+	if len(c.Providers) == 0 {
+		return errors.New("providers must define at least one provider")
 	}
 	names := make([]string, 0, len(c.Providers))
 	for name := range c.Providers {
@@ -160,19 +157,37 @@ func (p Provider) validate(prefix string) error {
 	return nil
 }
 
-// Active returns the active provider's name and configuration.
-func (c *Config) Active() (string, Provider) {
-	return c.ActiveProvider, c.Providers[c.ActiveProvider]
+// Provider returns the named provider's configuration, or an error listing
+// every configured provider name.
+func (c *Config) Provider(name string) (Provider, error) {
+	p, ok := c.Providers[name]
+	if !ok {
+		return Provider{}, fmt.Errorf("unknown provider %q; configured providers: %s", name, strings.Join(c.ProviderNames(), ", "))
+	}
+	return p, nil
 }
 
-// APIKey returns the active provider's API key from its env_key variable.
-func (c *Config) APIKey() (string, error) {
-	_, p := c.Active()
+// APIKeyFor returns the named provider's API key from its env_key variable.
+func (c *Config) APIKeyFor(name string) (string, error) {
+	p, err := c.Provider(name)
+	if err != nil {
+		return "", err
+	}
 	key := os.Getenv(p.EnvKey)
 	if key == "" {
-		return "", fmt.Errorf("environment variable %s (providers.%s.env_key) must be set to the API key", p.EnvKey, c.ActiveProvider)
+		return "", fmt.Errorf("environment variable %s (providers.%s.env_key) must be set to the API key", p.EnvKey, name)
 	}
 	return key, nil
+}
+
+// ProviderNames returns every configured provider name, sorted.
+func (c *Config) ProviderNames() []string {
+	names := make([]string, 0, len(c.Providers))
+	for name := range c.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // EnvKeys returns every provider's env_key, sorted and deduplicated.

@@ -9,7 +9,6 @@ import (
 )
 
 const validTOML = `
-active_provider = "deepseek"
 
 [providers.deepseek]
 api = "chat-completions"
@@ -43,9 +42,12 @@ func TestLoadValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	name, p := cfg.Active()
-	if name != "deepseek" || p.API != APIChatCompletions || p.BaseURL != "https://api.deepseek.com" {
-		t.Fatalf("Active() = %q %#v", name, p)
+	p, err := cfg.Provider("deepseek")
+	if err != nil {
+		t.Fatalf("Provider(deepseek) error = %v", err)
+	}
+	if p.API != APIChatCompletions || p.BaseURL != "https://api.deepseek.com" {
+		t.Fatalf("Provider(deepseek) = %#v", p)
 	}
 	if !reflect.DeepEqual(p.ModelIDs(), []string{"deepseek-flash", "deepseek-v4-pro"}) {
 		t.Fatalf("ModelIDs() = %v", p.ModelIDs())
@@ -59,6 +61,9 @@ func TestLoadValid(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.EnvKeys(), []string{"ANT_TEST_KEY", "DS_TEST_KEY"}) {
 		t.Fatalf("EnvKeys() = %v", cfg.EnvKeys())
+	}
+	if !reflect.DeepEqual(cfg.ProviderNames(), []string{"anthropic", "deepseek"}) {
+		t.Fatalf("ProviderNames() = %v", cfg.ProviderNames())
 	}
 	if cfg.Path == "" {
 		t.Fatalf("Path not recorded")
@@ -110,18 +115,35 @@ func TestLoadRelativePathStoredAbsolute(t *testing.T) {
 	})
 }
 
-func TestAPIKey(t *testing.T) {
+func TestAPIKeyFor(t *testing.T) {
 	cfg, err := Load(writeConfig(t, validTOML))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DS_TEST_KEY", "")
-	if _, err := cfg.APIKey(); err == nil || !strings.Contains(err.Error(), "DS_TEST_KEY") {
-		t.Fatalf("APIKey() error = %v, want mention of DS_TEST_KEY", err)
+	if _, err := cfg.APIKeyFor("deepseek"); err == nil || !strings.Contains(err.Error(), "DS_TEST_KEY") {
+		t.Fatalf("APIKeyFor() error = %v, want mention of DS_TEST_KEY", err)
 	}
 	t.Setenv("DS_TEST_KEY", "sk-1")
-	if key, err := cfg.APIKey(); err != nil || key != "sk-1" {
-		t.Fatalf("APIKey() = %q, %v", key, err)
+	if key, err := cfg.APIKeyFor("deepseek"); err != nil || key != "sk-1" {
+		t.Fatalf("APIKeyFor() = %q, %v", key, err)
+	}
+	if _, err := cfg.APIKeyFor("nope"); err == nil || !strings.Contains(err.Error(), "nope") || !strings.Contains(err.Error(), "deepseek") {
+		t.Fatalf("APIKeyFor(nope) error = %v, want it to name the unknown provider and list the configured ones", err)
+	}
+}
+
+func TestProviderLookup(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.Provider("deepseek"); err != nil {
+		t.Fatalf("Provider(deepseek) error = %v", err)
+	}
+	_, err = cfg.Provider("nope")
+	if err == nil || !strings.Contains(err.Error(), "nope") || !strings.Contains(err.Error(), "anthropic") || !strings.Contains(err.Error(), "deepseek") {
+		t.Fatalf("Provider(nope) error = %v, want it to name the unknown provider and list anthropic and deepseek", err)
 	}
 }
 
@@ -131,10 +153,8 @@ func TestLoadErrors(t *testing.T) {
 		content string
 		want    string
 	}{
-		{"unknown top key", "active_provider = \"x\"\ntypo = 1\n", "typo"},
+		{"unknown top key", "typo = 1\n", "typo"},
 		{"unknown provider key", strings.Replace(validTOML, `env_key = "ANT_TEST_KEY"`, "env_key = \"ANT_TEST_KEY\"\nmodel = \"x\"", 1), "model"},
-		{"missing active", strings.Replace(validTOML, `active_provider = "deepseek"`, "", 1), "active_provider"},
-		{"undefined active", strings.Replace(validTOML, `active_provider = "deepseek"`, `active_provider = "nope"`, 1), "active_provider"},
 		{"bad api", strings.Replace(validTOML, `api = "messages"`, `api = "grpc"`, 1), "providers.anthropic.api"},
 		{"missing env_key", strings.Replace(validTOML, `env_key = "ANT_TEST_KEY"`, "", 1), "providers.anthropic.env_key"},
 		{"default not in models", strings.Replace(validTOML, `default_model = "claude-sonnet-5"`, `default_model = "claude-opus-5"`, 1), "providers.anthropic.default_model"},
@@ -143,6 +163,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad effort key", strings.Replace(validTOML, `medium = "high"`, `turbo = "high"`, 1), "providers.deepseek.effort_map"},
 		{"bad effort value", strings.Replace(validTOML, `medium = "high"`, `medium = "turbo"`, 1), "providers.deepseek.effort_map"},
 		{"negative max tokens", strings.Replace(validTOML, `api = "messages"`, "api = \"messages\"\nmax_output_tokens = -1", 1), "providers.anthropic.max_output_tokens"},
+		{"no providers", "providers = {}\n", "at least one provider"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -186,7 +207,22 @@ func TestValidEffort(t *testing.T) {
 }
 
 func TestExampleConfigLoads(t *testing.T) {
-	cfg, err := Load("../../config.example.toml")
+	// config.example.toml still carries the legacy active_provider key until a
+	// later work unit removes it; strip that key here so the rest of the
+	// example loads under the name-keyed config (strict decoding rejects the
+	// removed field).
+	data, err := os.ReadFile("../../config.example.toml")
+	if err != nil {
+		t.Fatalf("read config.example.toml: %v", err)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "active_provider") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	cfg, err := Load(writeConfig(t, strings.Join(lines, "\n")))
 	if err != nil {
 		t.Fatalf("config.example.toml does not load: %v", err)
 	}

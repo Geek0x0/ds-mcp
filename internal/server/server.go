@@ -136,18 +136,42 @@ func resolveEffort(arguments map[string]any, configMap map[string]any) (string, 
 	return requested, nil
 }
 
-// modelDescription describes the active provider's models for the model
-// parameter of the start tool.
-func modelDescription(cfg config.Provider) string {
-	models := make([]string, 0, len(cfg.Models))
-	for _, model := range cfg.Models {
-		if model.Description == "" {
-			models = append(models, model.ID)
-			continue
+// modelUnionSchema returns every configured provider's model ids, deduplicated
+// in provider-name order, and a description grouping them by provider, for
+// the model parameter of the start tool.
+func modelUnionSchema(cfg *config.Config) (ids []string, description string) {
+	seen := map[string]bool{}
+	var groups []string
+	for _, name := range cfg.ProviderNames() {
+		p := cfg.Providers[name]
+		models := make([]string, 0, len(p.Models))
+		for _, model := range p.Models {
+			if !seen[model.ID] {
+				seen[model.ID] = true
+				ids = append(ids, model.ID)
+			}
+			if model.Description == "" {
+				models = append(models, model.ID)
+			} else {
+				models = append(models, fmt.Sprintf("%s (%s)", model.ID, model.Description))
+			}
 		}
-		models = append(models, fmt.Sprintf("%s (%s)", model.ID, model.Description))
+		groups = append(groups, fmt.Sprintf("%s: %s", name, strings.Join(models, ", ")))
 	}
-	return fmt.Sprintf("Model to use; default: %s. Available: %s", cfg.DefaultModel, strings.Join(models, ", "))
+	description = fmt.Sprintf(
+		"Model to use; the available id depends on the chosen provider. By provider: %s",
+		strings.Join(groups, "; "),
+	)
+	return ids, description
+}
+
+// providerDescription lists every configured provider name for the provider
+// parameter of the start tool.
+func providerDescription(cfg *config.Config) string {
+	return fmt.Sprintf(
+		"Configured provider to use for this session; required when more than one is configured. Available: %s.",
+		strings.Join(cfg.ProviderNames(), ", "),
+	)
 }
 
 func parseWritableRoots(config map[string]any) ([]string, error) {
@@ -175,13 +199,12 @@ func parseWritableRoots(config map[string]any) ([]string, error) {
 }
 
 type Server struct {
-	mcp          *mcpserver.MCPServer
-	mgr          *agent.Manager
-	runner       *agent.Runner
-	version      string
-	providerName string
-	toolName     string
-	cfg          config.Provider
+	mcp      *mcpserver.MCPServer
+	mgr      *agent.Manager
+	runner   *agent.Runner
+	version  string
+	toolName string
+	cfg      *config.Config
 
 	callsMu sync.Mutex
 	calls   map[string]context.CancelFunc
@@ -220,16 +243,15 @@ func ValidateToolName(name string) error {
 	return nil
 }
 
-// New builds a Server for the active provider. cfg is the active provider's
-// config entry and drives the model enum, the default model, and effort mapping.
-func New(p provider.Provider, cfg config.Provider, version string, opts ...Option) *Server {
+// New builds a Server. cfg holds every configured provider; which one a
+// session uses is resolved per call from the provider argument.
+func New(cfg *config.Config, version string, opts ...Option) *Server {
 	s := &Server{
-		mgr:          agent.NewManager(),
-		version:      version,
-		providerName: p.Name(),
-		toolName:     defaultToolName,
-		cfg:          cfg,
-		calls:        make(map[string]context.CancelFunc),
+		mgr:      agent.NewManager(),
+		version:  version,
+		toolName: defaultToolName,
+		cfg:      cfg,
+		calls:    make(map[string]context.CancelFunc),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -256,7 +278,7 @@ func New(p provider.Provider, cfg config.Provider, version string, opts ...Optio
 		mcpserver.WithHooks(hooks),
 	)
 	s.mcp.AddNotificationHandler(cancelledNotificationMethod, s.handleCancelledNotification)
-	s.runner = &agent.Runner{Provider: p, Emitter: s, Approver: s}
+	s.runner = &agent.Runner{Emitter: s, Approver: s}
 	s.mcp.AddTool(startTool(s.toolName, cfg), s.handleStart)
 	s.mcp.AddTool(replyTool(s.toolName), s.handleReply)
 	return s
@@ -318,7 +340,8 @@ type toolOutput struct {
 	Content  string `json:"content" jsonschema_description:"Human-readable report text from the subagent."`
 }
 
-func startTool(name string, cfg config.Provider) mcp.Tool {
+func startTool(name string, cfg *config.Config) mcp.Tool {
+	modelIDs, modelDesc := modelUnionSchema(cfg)
 	return mcp.NewTool(
 		name,
 		mcp.WithDescription("Start a new subagent coding-agent thread."),
@@ -328,9 +351,14 @@ func startTool(name string, cfg config.Provider) mcp.Tool {
 			mcp.Description("Task prompt to send to the new subagent thread."),
 		),
 		mcp.WithString(
+			"provider",
+			mcp.Enum(cfg.ProviderNames()...),
+			mcp.Description(providerDescription(cfg)),
+		),
+		mcp.WithString(
 			"model",
-			mcp.Enum(cfg.ModelIDs()...),
-			mcp.Description(modelDescription(cfg)),
+			mcp.Enum(modelIDs...),
+			mcp.Description(modelDesc),
 		),
 		mcp.WithString(
 			"cwd",
@@ -393,6 +421,43 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 	arguments := req.GetArguments()
 
+	var providerArg string
+	if raw, present := arguments["provider"]; present {
+		var ok bool
+		providerArg, ok = raw.(string)
+		if !ok {
+			return mcp.NewToolResultError(`argument "provider" must be a string`), nil
+		}
+	}
+	var providerName string
+	var providerCfg config.Provider
+	switch {
+	case providerArg != "":
+		var err error
+		providerCfg, err = s.cfg.Provider(providerArg)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		providerName = providerArg
+	case len(s.cfg.Providers) == 1:
+		for name, p := range s.cfg.Providers {
+			providerName, providerCfg = name, p
+		}
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"provider is required when more than one is configured; available: %s",
+			strings.Join(s.cfg.ProviderNames(), ", "),
+		)), nil
+	}
+	key, err := s.cfg.APIKeyFor(providerName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	selectedProvider, err := provider.New(providerName, providerCfg, key)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	sandboxValue := req.GetString("sandbox", "read-only")
 	sandbox, err := policy.ParseSandbox(sandboxValue)
 	if err != nil {
@@ -420,12 +485,12 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		}
 	}
 	if model == "" {
-		model = s.cfg.DefaultModel
-	} else if !s.cfg.HasModel(model) {
+		model = providerCfg.DefaultModel
+	} else if !providerCfg.HasModel(model) {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"unknown model %q; available models: %s",
 			model,
-			strings.Join(s.cfg.ModelIDs(), ", "),
+			strings.Join(providerCfg.ModelIDs(), ", "),
 		)), nil
 	}
 
@@ -489,12 +554,13 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	sess := s.mgr.Create(agent.Options{
+		Provider:        selectedProvider,
 		Model:           model,
 		Cwd:             cwd,
 		Sandbox:         sandbox,
 		Approval:        approval,
 		ReasoningEffort: requested,
-		EffortSent:      s.cfg.MapEffort(requested),
+		EffortSent:      providerCfg.MapEffort(requested),
 		SystemPrompt:    systemPrompt,
 		MaxTurns:        maxTurns,
 		WritableRoots:   writableRoots,
@@ -510,7 +576,7 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		"originator":        "subagent-mcp",
 		"cli_version":       s.version,
 		"source":            "mcp",
-		"model_provider":    s.providerName,
+		"model_provider":    sess.Provider().Name(),
 		"base_instructions": map[string]any{"text": systemPrompt},
 	}
 	if resolvedCwd, err := filepath.EvalSymlinks(cwd); err == nil {

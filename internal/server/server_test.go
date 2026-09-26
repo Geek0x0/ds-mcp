@@ -30,6 +30,8 @@ type stubTurn struct {
 }
 
 type stubProvider struct {
+	name string
+
 	mu       sync.Mutex
 	turns    []stubTurn
 	repeat   *provider.TurnResult
@@ -38,7 +40,12 @@ type stubProvider struct {
 	entered  chan<- struct{}
 }
 
-func (p *stubProvider) Name() string { return "deepseek" }
+func (p *stubProvider) Name() string {
+	if p.name != "" {
+		return p.name
+	}
+	return "deepseek"
+}
 
 func (p *stubProvider) Turn(
 	ctx context.Context,
@@ -124,14 +131,67 @@ func (s *fakeElicitationSession) RequestElicitation(
 	return s.result, s.err
 }
 
-// testProviderConfig is the active-provider configuration used by server tests.
-func testProviderConfig() config.Provider {
-	return config.Provider{
-		API:          config.APIChatCompletions,
-		DefaultModel: "m-fast",
-		Models:       []config.Model{{ID: "m-fast", Description: "fast"}, {ID: "m-pro"}},
-		EffortMap:    map[string]string{"xhigh": "max"},
+const testProviderAPI = "test-stub"
+
+var (
+	testStubsMu sync.Mutex
+	testStubs   = map[string]provider.Provider{}
+)
+
+func init() {
+	provider.Register(testProviderAPI, func(name string, _ config.Provider, _ string) (provider.Provider, error) {
+		testStubsMu.Lock()
+		defer testStubsMu.Unlock()
+		p, ok := testStubs[name]
+		if !ok {
+			return nil, fmt.Errorf("no test stub registered for provider %q", name)
+		}
+		return p, nil
+	})
+}
+
+func registerTestStub(t *testing.T, name string, p provider.Provider) {
+	t.Helper()
+	testStubsMu.Lock()
+	testStubs[name] = p
+	testStubsMu.Unlock()
+	t.Cleanup(func() {
+		testStubsMu.Lock()
+		delete(testStubs, name)
+		testStubsMu.Unlock()
+	})
+}
+
+// testConfig returns a single-provider config named "deepseek", backed by
+// client through the test-stub factory, with the same model/effort_map
+// fixture the old single-provider config helper used.
+func testConfig(t *testing.T, client provider.Provider) *config.Config {
+	t.Helper()
+	return testMultiConfig(t, map[string]provider.Provider{"deepseek": client})
+}
+
+// testMultiConfig registers each named provider's stub and returns a config
+// defining exactly those providers, each with a distinct env_key
+// ("TEST_STUB_KEY_" + uppercased name, pre-set via t.Setenv) and models
+// ["m-fast" (description "fast"), "m-pro"], default "m-fast", effort_map
+// {"xhigh": "max"} — the same fixture values the old single-provider config
+// helper used, applied per provider.
+func testMultiConfig(t *testing.T, providers map[string]provider.Provider) *config.Config {
+	t.Helper()
+	cfg := &config.Config{Providers: map[string]config.Provider{}}
+	for name, client := range providers {
+		registerTestStub(t, name, client)
+		envKey := "TEST_STUB_KEY_" + strings.ToUpper(name)
+		t.Setenv(envKey, "test-key-"+name)
+		cfg.Providers[name] = config.Provider{
+			API:          testProviderAPI,
+			EnvKey:       envKey,
+			DefaultModel: "m-fast",
+			Models:       []config.Model{{ID: "m-fast", Description: "fast"}, {ID: "m-pro"}},
+			EffortMap:    map[string]string{"xhigh": "max"},
+		}
 	}
+	return cfg
 }
 
 func TestToolDeclarations(t *testing.T) {
@@ -143,7 +203,7 @@ func TestToolDeclarations(t *testing.T) {
 	}{
 		{
 			name: "subagent",
-			tool: startTool("subagent", testProviderConfig()),
+			tool: startTool("subagent", testConfig(t, &stubProvider{})),
 			properties: []string{
 				"approval-policy",
 				"base-instructions",
@@ -152,6 +212,7 @@ func TestToolDeclarations(t *testing.T) {
 				"developer-instructions",
 				"model",
 				"prompt",
+				"provider",
 				"reasoning-effort",
 				"sandbox",
 			},
@@ -201,7 +262,7 @@ func TestWithToolNameRegistersRenamedTools(t *testing.T) {
 		{result: &provider.TurnResult{Text: "hi from codex"}},
 		{result: &provider.TurnResult{Text: "continued"}},
 	}}
-	s := New(client, testProviderConfig(), "test", WithToolName("codex"))
+	s := New(testConfig(t, client), "test", WithToolName("codex"))
 
 	listResponse := s.mcp.HandleMessage(
 		context.Background(),
@@ -331,7 +392,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		name string
 		tool mcp.Tool
 	}{
-		{name: "subagent", tool: startTool("subagent", testProviderConfig())},
+		{name: "subagent", tool: startTool("subagent", testConfig(t, &stubProvider{}))},
 		{name: "subagent-reply", tool: replyTool("subagent")},
 	}
 
@@ -393,9 +454,9 @@ func toolInputSchemaJSON(t *testing.T, s *Server, name string) string {
 }
 
 func TestModelParameterFromConfig(t *testing.T) {
-	s := New(&stubProvider{}, testProviderConfig(), "test")
+	s := New(testConfig(t, &stubProvider{}), "test")
 	schema := toolInputSchemaJSON(t, s, "subagent")
-	for _, want := range []string{`"m-fast"`, `"m-pro"`, "default: m-fast", "m-fast (fast)"} {
+	for _, want := range []string{`"m-fast"`, `"m-pro"`, "deepseek: m-fast", "m-fast (fast)"} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("schema %s lacks %q", schema, want)
 		}
@@ -409,7 +470,7 @@ func TestModelParameterFromConfig(t *testing.T) {
 
 func TestModelDefaultAndRejection(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir()}))
 	if err != nil || result.IsError || client.recordedRequests()[0].Model != "m-fast" {
 		t.Fatalf("default model not applied: %#v %v", result, err)
@@ -428,7 +489,7 @@ func TestModelDefaultAndRejection(t *testing.T) {
 
 func TestHandleStartRejectsNonStringModel(t *testing.T) {
 	client := &stubProvider{}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "x", "cwd": t.TempDir(), "model": 5}))
 	if err != nil {
 		t.Fatalf("handleStart() Go error = %v, want nil", err)
@@ -449,7 +510,7 @@ func TestEffortPassThroughAndMap(t *testing.T) {
 		{"xhigh", "max"}, {"medium", "medium"}, {"none", "none"}, {"", "high"},
 	} {
 		client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-		s := New(client, testProviderConfig(), "test")
+		s := New(testConfig(t, client), "test")
 		args := map[string]any{"prompt": "hi", "cwd": t.TempDir()}
 		if tc.requested != "" {
 			args["reasoning-effort"] = tc.requested
@@ -509,7 +570,7 @@ func TestHandleStartValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, testProviderConfig(), "test")
+			s := New(testConfig(t, &stubProvider{}), "test")
 			result, err := s.handleStart(context.Background(), callToolRequest("subagent", test.args))
 			if err != nil {
 				t.Fatalf("handleStart() Go error = %v, want nil", err)
@@ -533,7 +594,7 @@ func TestHandleStartIncludesAgentsMDBeforeDeveloperInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt":                 "hello",
@@ -558,7 +619,7 @@ func TestHandleStartAgentsMDReadErrorFails(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(cwd, "AGENTS.md"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := New(&stubProvider{}, testProviderConfig(), "test")
+	s := New(testConfig(t, &stubProvider{}), "test")
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    cwd,
@@ -573,7 +634,7 @@ func TestHandleStartAndReplyContinueSession(t *testing.T) {
 		{result: &provider.TurnResult{Text: "hi"}},
 		{result: &provider.TurnResult{Text: "continued"}},
 	}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	first, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
@@ -616,7 +677,7 @@ func TestHandleStartAndReplyContinueSession(t *testing.T) {
 
 func TestHandleStartAppliesModelAndInstructions(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt":                 "hello",
@@ -650,7 +711,7 @@ func TestHandleStartAppliesModelAndInstructions(t *testing.T) {
 
 func TestHandleStartDefaultsReasoningEffort(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
@@ -688,7 +749,7 @@ func TestHandleStartReasoningEffortSources(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-			s := New(client, testProviderConfig(), "test")
+			s := New(testConfig(t, client), "test")
 			args := map[string]any{"prompt": "hello", "cwd": t.TempDir()}
 			for key, value := range test.args {
 				args[key] = value
@@ -721,7 +782,7 @@ func TestHandleStartRejectsInvalidConfigReasoningEffort(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, testProviderConfig(), "test")
+			s := New(testConfig(t, &stubProvider{}), "test")
 			result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 				"prompt": "hello",
 				"cwd":    t.TempDir(),
@@ -741,7 +802,7 @@ func TestHandleStartRejectsInvalidConfigReasoningEffort(t *testing.T) {
 }
 
 func TestHandleReplyUnknownThread(t *testing.T) {
-	s := New(&stubProvider{}, testProviderConfig(), "test")
+	s := New(testConfig(t, &stubProvider{}), "test")
 	result, err := s.handleReply(context.Background(), callToolRequest("subagent-reply", map[string]any{
 		"threadId": "not-a-thread",
 		"prompt":   "hello",
@@ -766,7 +827,7 @@ func TestHandleReplyBusy(t *testing.T) {
 		block:   unblock,
 		entered: entered,
 	}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	cwd := t.TempDir()
 	threadIDs := make(chan string, 1)
 	s.runner.Emitter = emitterFunc(func(_ context.Context, threadID string, _ map[string]any) {
@@ -848,7 +909,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 
 			entered := make(chan struct{}, 1)
 			client := &stubProvider{block: unblock, entered: entered}
-			s := New(client, testProviderConfig(), "test")
+			s := New(testConfig(t, client), "test")
 
 			rawCall := fmt.Sprintf(
 				`{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"subagent","arguments":{"prompt":"hello","cwd":%q,"approval-policy":"never"}}}`,
@@ -916,7 +977,7 @@ func TestCancelledNotificationStopsRunningCall(t *testing.T) {
 
 func TestCancelledNotificationUnknownIDIsIgnored(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	for _, raw := range []string{
 		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"no-such-call","reason":"stale"}}`,
@@ -948,7 +1009,7 @@ func TestHandleStartTurnLimitPreservesThreadID(t *testing.T) {
 	client := &stubProvider{repeat: &provider.TurnResult{ToolCalls: []provider.ToolCall{
 		toolCall("call-forever", "unknown_tool", `{}`),
 	}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "never finish",
@@ -983,7 +1044,7 @@ func TestHandleStartIgnoresExcessiveMaxTurns(t *testing.T) {
 	}
 	turns[agent.DefaultMaxTurns] = stubTurn{result: &provider.TurnResult{Text: "should not be reached"}}
 	client := &stubProvider{turns: turns}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "use a bounded turn count",
@@ -1017,7 +1078,7 @@ func TestApproveElicitationActions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, testProviderConfig(), "test")
+			s := New(testConfig(t, &stubProvider{}), "test")
 			var result *mcp.ElicitationResult
 			if test.err == nil {
 				result = &mcp.ElicitationResult{
@@ -1063,7 +1124,7 @@ func TestApprovalUnavailableDeniesToolCall(t *testing.T) {
 		}}},
 		{result: &provider.TurnResult{Text: "denied safely"}},
 	}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt":          "write a file",
@@ -1092,7 +1153,7 @@ func TestApprovalUnavailableDeniesToolCall(t *testing.T) {
 }
 
 func TestEmitWithoutClientReturnsPromptly(t *testing.T) {
-	s := New(&stubProvider{}, testProviderConfig(), "test")
+	s := New(testConfig(t, &stubProvider{}), "test")
 	done := make(chan struct{})
 	go func() {
 		s.Emit(context.Background(), "thread", map[string]any{"type": "test"})
@@ -1183,7 +1244,7 @@ func TestProgressNotificationsWithToken(t *testing.T) {
 		}}},
 		{result: &provider.TurnResult{Text: "line one\nline two"}},
 	}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
 
 	notifications := runScriptedSubagentCall(t, s, session, map[string]any{"progressToken": "tok-1"})
@@ -1234,7 +1295,7 @@ func TestNoProgressNotificationsWithoutToken(t *testing.T) {
 		}}},
 		{result: &provider.TurnResult{Text: "line one\nline two"}},
 	}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	session := &fakeElicitationSession{notifications: make(chan mcp.JSONRPCNotification, 64)}
 
 	notifications := runScriptedSubagentCall(t, s, session, nil)
@@ -1292,7 +1353,7 @@ func TestHandleStartValidatesWritableRoots(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := New(&stubProvider{}, testProviderConfig(), "test")
+			s := New(testConfig(t, &stubProvider{}), "test")
 			result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 				"prompt": "hello",
 				"cwd":    t.TempDir(),
@@ -1307,7 +1368,7 @@ func TestHandleStartValidatesWritableRoots(t *testing.T) {
 
 func TestHandleStartAcceptsWritableRoots(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
@@ -1323,7 +1384,7 @@ func TestHandleStartWritesSessionMeta(t *testing.T) {
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "9.9.9")
+	s := New(testConfig(t, client), "9.9.9")
 
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
@@ -1368,7 +1429,7 @@ func TestHandleStartRolloutOffWritesNothing(t *testing.T) {
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "off")
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
-	s := New(client, testProviderConfig(), "test")
+	s := New(testConfig(t, client), "test")
 	if result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
 		"prompt": "hello",
 		"cwd":    t.TempDir(),
@@ -1452,3 +1513,110 @@ func toolMessageContent(t *testing.T, messages []provider.Message, callID string
 
 var _ provider.Provider = (*stubProvider)(nil)
 var _ mcpserver.SessionWithElicitation = (*fakeElicitationSession)(nil)
+
+func TestProviderOmittedWithSingleProviderConfigured(t *testing.T) {
+	client := &stubProvider{name: "deepseek", turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
+	s := New(testConfig(t, client), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir()}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
+	}
+	if len(client.recordedRequests()) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(client.recordedRequests()))
+	}
+}
+
+func TestProviderRequiredWithMultipleConfigured(t *testing.T) {
+	clientA := &stubProvider{name: "a"}
+	clientB := &stubProvider{name: "b"}
+	s := New(testMultiConfig(t, map[string]provider.Provider{"a": clientA, "b": clientB}), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir()}))
+	if err != nil || !result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want a tool error", result, err)
+	}
+	text := toolResultText(t, result)
+	for _, want := range []string{"provider is required", "a", "b"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error %q lacks %q", text, want)
+		}
+	}
+	if len(clientA.recordedRequests()) != 0 || len(clientB.recordedRequests()) != 0 {
+		t.Fatalf("no provider should have been called: a=%d b=%d", len(clientA.recordedRequests()), len(clientB.recordedRequests()))
+	}
+}
+
+func TestProviderSelectsNamedProvider(t *testing.T) {
+	clientA := &stubProvider{name: "a", turns: []stubTurn{{result: &provider.TurnResult{Text: "from a"}}}}
+	clientB := &stubProvider{name: "b", turns: []stubTurn{{result: &provider.TurnResult{Text: "from b"}}}}
+	s := New(testMultiConfig(t, map[string]provider.Provider{"a": clientA, "b": clientB}), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir(), "provider": "b"}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
+	}
+	if got := toolResultText(t, result); got != "from b" {
+		t.Fatalf("result text = %q, want %q", got, "from b")
+	}
+	if len(clientA.recordedRequests()) != 0 {
+		t.Fatalf("provider a must not have been called: %d requests", len(clientA.recordedRequests()))
+	}
+	if len(clientB.recordedRequests()) != 1 {
+		t.Fatalf("provider b requests = %d, want 1", len(clientB.recordedRequests()))
+	}
+}
+
+func TestProviderUnknownNameRejected(t *testing.T) {
+	client := &stubProvider{name: "deepseek"}
+	s := New(testConfig(t, client), "test")
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir(), "provider": "nope"}))
+	if err != nil || !result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want a tool error", result, err)
+	}
+	text := toolResultText(t, result)
+	for _, want := range []string{"nope", "deepseek"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error %q lacks %q", text, want)
+		}
+	}
+	if len(client.recordedRequests()) != 0 {
+		t.Fatalf("provider must not have been called")
+	}
+}
+
+func TestProviderMissingKeyFailsOnlyThatCall(t *testing.T) {
+	clientA := &stubProvider{name: "a", turns: []stubTurn{{result: &provider.TurnResult{Text: "from a"}}}}
+	clientB := &stubProvider{name: "b"}
+	cfg := testMultiConfig(t, map[string]provider.Provider{"a": clientA, "b": clientB})
+	os.Unsetenv("TEST_STUB_KEY_B")
+	s := New(cfg, "test")
+
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir(), "provider": "b"}))
+	if err != nil || !result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want a tool error", result, err)
+	}
+	if text := toolResultText(t, result); !strings.Contains(text, "TEST_STUB_KEY_B") {
+		t.Errorf("error %q lacks the missing env var name", text)
+	}
+
+	result, err = s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir(), "provider": "a"}))
+	if err != nil || result.IsError {
+		t.Fatalf("provider a call failed after provider b's key error: (%#v, %v)", result, err)
+	}
+}
+
+func TestModelParameterUnionAcrossProviders(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]config.Provider{
+		"a": {API: testProviderAPI, EnvKey: "TEST_STUB_KEY_A", DefaultModel: "a-model", Models: []config.Model{{ID: "a-model"}}},
+		"b": {API: testProviderAPI, EnvKey: "TEST_STUB_KEY_B", DefaultModel: "b-model", Models: []config.Model{{ID: "b-model", Description: "strong"}}},
+	}}
+	registerTestStub(t, "a", &stubProvider{name: "a"})
+	registerTestStub(t, "b", &stubProvider{name: "b"})
+	t.Setenv("TEST_STUB_KEY_A", "k")
+	t.Setenv("TEST_STUB_KEY_B", "k")
+	s := New(cfg, "test")
+	schema := toolInputSchemaJSON(t, s, "subagent")
+	for _, want := range []string{`"a-model"`, `"b-model"`, "a: a-model", "b: b-model (strong)"} {
+		if !strings.Contains(schema, want) {
+			t.Errorf("schema %s lacks %q", schema, want)
+		}
+	}
+}

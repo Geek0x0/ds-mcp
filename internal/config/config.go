@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -23,6 +24,8 @@ const (
 
 // EffortValues lists the reasoning effort values accepted from callers.
 var EffortValues = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+var providerNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Model describes one model advertised by a provider.
 type Model struct {
@@ -74,6 +77,12 @@ func Load(path string) (*Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		var strict *toml.StrictMissingError
 		if errors.As(err, &strict) {
+			for _, fieldErr := range strict.Errors {
+				key := fieldErr.Key()
+				if len(key) == 1 && key[0] == "active_provider" {
+					return nil, fmt.Errorf("config file %s: active_provider was removed in subagent-mcp 0.8.0; delete that line and select a provider per call with the start tool's provider argument instead", path)
+				}
+			}
 			return nil, fmt.Errorf("config file %s: unknown keys: %s", path, strict.String())
 		}
 		return nil, fmt.Errorf("config file %s: %w", path, err)
@@ -114,6 +123,9 @@ func (c *Config) Validate() error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if !providerNamePattern.MatchString(name) {
+			return fmt.Errorf("providers %q is not a valid provider name; use only letters, digits, '.', '_', or '-'", name)
+		}
 		if err := c.Providers[name].validate("providers." + name); err != nil {
 			return err
 		}

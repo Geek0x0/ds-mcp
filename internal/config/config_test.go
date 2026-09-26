@@ -163,6 +163,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad effort key", strings.Replace(validTOML, `medium = "high"`, `turbo = "high"`, 1), "providers.deepseek.effort_map"},
 		{"bad effort value", strings.Replace(validTOML, `medium = "high"`, `medium = "turbo"`, 1), "providers.deepseek.effort_map"},
 		{"negative max tokens", strings.Replace(validTOML, `api = "messages"`, "api = \"messages\"\nmax_output_tokens = -1", 1), "providers.anthropic.max_output_tokens"},
+		{"invalid provider name", strings.Replace(validTOML, "[providers.deepseek]", `[providers."bad name!"]`, 1), "not a valid provider name"},
 		{"no providers", "providers = {}\n", "at least one provider"},
 	}
 	for _, test := range tests {
@@ -172,6 +173,25 @@ func TestLoadErrors(t *testing.T) {
 				t.Fatalf("Load() error = %v, want it to mention %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsLegacyActiveProviderWithUpgradeHint(t *testing.T) {
+	const legacy = `
+active_provider = "deepseek"
+
+[providers.deepseek]
+api = "chat-completions"
+env_key = "DS_TEST_KEY"
+default_model = "deepseek-flash"
+models = [{ id = "deepseek-flash" }]
+`
+	_, err := Load(writeConfig(t, legacy))
+	if err == nil {
+		t.Fatal("Load() error = nil, want a rejection naming active_provider")
+	}
+	if !strings.Contains(err.Error(), "active_provider was removed") || !strings.Contains(err.Error(), "0.8.0") {
+		t.Fatalf("Load() error = %v, want it to explain active_provider was removed in 0.8.0", err)
 	}
 }
 

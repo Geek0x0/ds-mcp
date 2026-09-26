@@ -35,7 +35,6 @@ type Approver interface {
 }
 
 type Runner struct {
-	Provider provider.Provider
 	Emitter  Emitter
 	Approver Approver
 }
@@ -119,7 +118,7 @@ func (r *Runner) Run(ctx context.Context, s *Session, prompt string) (string, er
 	s.messages = append(s.messages, provider.Message{Role: provider.RoleUser, Text: prompt})
 
 	for turn := 0; turn < s.maxTurns; turn++ {
-		res, err := r.Provider.Turn(ctx, provider.TurnRequest{
+		res, err := s.provider.Turn(ctx, provider.TurnRequest{
 			Model:    s.model,
 			Effort:   s.effortSent,
 			System:   s.system,

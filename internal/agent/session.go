@@ -30,6 +30,7 @@ const DefaultSystemPrompt = `You are subagent-mcp, a coding agent. You work insi
 Work autonomously on the task you are given: inspect what you need, make the smallest change that satisfies the request, and verify it when possible. Some calls may be denied by the sandbox policy or the user; when that happens, adapt your approach or explain the blocker instead of repeating the same call. When the task is done, reply WITHOUT any tool call: summarize what you did, list changed files, and how you verified the result.`
 
 type Options struct {
+	Provider        provider.Provider
 	Model           string
 	ReasoningEffort string
 	EffortSent      string
@@ -44,6 +45,7 @@ type Options struct {
 type Session struct {
 	ID string
 
+	provider        provider.Provider
 	model           string
 	reasoningEffort string
 	effortSent      string
@@ -90,6 +92,7 @@ func (m *Manager) Create(o Options) *Session {
 
 	session := &Session{
 		ID:              uuid.NewString(),
+		provider:        o.Provider,
 		model:           o.Model,
 		reasoningEffort: o.ReasoningEffort,
 		effortSent:      o.EffortSent,
@@ -171,6 +174,11 @@ func (s *Session) AttachRollout(r *rollout.Recorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollout = r
+}
+
+// Provider returns the provider.Provider instance this session was created with.
+func (s *Session) Provider() provider.Provider {
+	return s.provider
 }
 
 // shellWritableRoots returns the Landlock writable roots for shell calls the

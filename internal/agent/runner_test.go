@@ -147,8 +147,8 @@ func (a *stubApprover) recordedRequests() []ApprovalRequest {
 func TestRunnerPureTextOneTurn(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "done"}}}}
 	emitter := &recEmitter{}
-	session := newTestSession(t, Options{})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client})
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "finish the task")
 	if err != nil {
@@ -183,8 +183,9 @@ func TestRunnerIncludesReasoningEffort(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "done"}}}}
+			test.options.Provider = client
 			session := newTestSession(t, test.options)
-			runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+			runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 			if _, err := runner.Run(context.Background(), session, "finish the task"); err != nil {
 				t.Fatalf("Run() error = %v", err)
@@ -209,11 +210,12 @@ func TestRunnerShellToolCallThenText(t *testing.T) {
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
+		Provider: client,
 		Cwd:      t.TempDir(),
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "say hi")
 	if err != nil {
@@ -265,8 +267,8 @@ func TestRunnerPassesReasoningBackInHistory(t *testing.T) {
 		}},
 		{result: &provider.TurnResult{Text: "done"}},
 	}}
-	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client, Sandbox: "danger-full-access", Approval: "never"})
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "use a tool"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -305,11 +307,12 @@ func TestRunnerEmptyFileResultHasNonEmptyToolContent(t *testing.T) {
 		{result: &provider.TurnResult{Text: "empty file handled"}},
 	}}
 	session := newTestSession(t, Options{
+		Provider: client,
 		Cwd:      cwd,
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "read empty.txt"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -334,11 +337,12 @@ func TestRunnerApprovalDenied(t *testing.T) {
 	emitter := &recEmitter{}
 	approver := &stubApprover{approved: false}
 	session := newTestSession(t, Options{
+		Provider: client,
 		Cwd:      t.TempDir(),
 		Sandbox:  policy.Sandbox("read-only"),
 		Approval: policy.ApprovalPolicy("on-request"),
 	})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: approver}
+	runner := &Runner{Emitter: emitter, Approver: approver}
 
 	got, err := runner.Run(context.Background(), session, "write a file")
 	if err != nil {
@@ -380,11 +384,12 @@ func TestRunnerRecoversToolExecutionPanicAndCompletesHistory(t *testing.T) {
 	recorder := &recEmitter{}
 	emitter := &panicOnceEmitter{recorder: recorder, panicType: "exec_command_begin"}
 	session := newTestSession(t, Options{
+		Provider: client,
 		Cwd:      t.TempDir(),
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "trigger a tool panic")
 	if err != nil {
@@ -441,11 +446,12 @@ func TestRunnerNeverPolicyDenial(t *testing.T) {
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
+		Provider: client,
 		Cwd:      t.TempDir(),
 		Sandbox:  policy.Sandbox("read-only"),
 		Approval: policy.ApprovalPolicy("never"),
 	})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{approved: true}}
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{approved: true}}
 
 	if _, err := runner.Run(context.Background(), session, "remove x"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -471,12 +477,13 @@ func TestRunnerTurnLimitReachedThenResumed(t *testing.T) {
 	}}
 	emitter := &recEmitter{}
 	session := newTestSession(t, Options{
+		Provider: client,
 		Cwd:      t.TempDir(),
 		Sandbox:  policy.Sandbox("workspace-write"),
 		Approval: policy.ApprovalPolicy("never"),
 		MaxTurns: 2,
 	})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 
 	got, err := runner.Run(context.Background(), session, "keep using tools")
 	if got != "" {
@@ -541,8 +548,8 @@ func TestRunnerStoresOpaqueAndMarksToolErrors(t *testing.T) {
 		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{denied}, Opaque: json.RawMessage(`{"k":1}`)}},
 		{result: &provider.TurnResult{Text: "ok"}},
 	}}
-	session := newTestSession(t, Options{Sandbox: "workspace-write", Approval: "never"})
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client, Sandbox: "workspace-write", Approval: "never"})
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 	if _, err := runner.Run(context.Background(), session, "go"); err != nil {
 		t.Fatal(err)
 	}
@@ -562,8 +569,8 @@ func TestRunnerShellNonZeroExitIsNotToolError(t *testing.T) {
 		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
 		{result: &provider.TurnResult{Text: "ok"}},
 	}}
-	session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client, Sandbox: "danger-full-access", Approval: "never"})
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 	if _, err := runner.Run(context.Background(), session, "go"); err != nil {
 		t.Fatal(err)
 	}
@@ -601,8 +608,8 @@ func TestRunnerRejectsTruncatedToolArguments(t *testing.T) {
 				{result: &provider.TurnResult{Text: "ok"}},
 			}}
 			emitter := &recEmitter{}
-			session := newTestSession(t, Options{Sandbox: "danger-full-access", Approval: "never"})
-			runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+			session := newTestSession(t, Options{Provider: client, Sandbox: "danger-full-access", Approval: "never"})
+			runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 			if _, err := runner.Run(context.Background(), session, "go"); err != nil {
 				t.Fatal(err)
 			}
@@ -634,8 +641,8 @@ func TestRunnerBusy(t *testing.T) {
 		block:   unblock,
 		entered: entered,
 	}
-	session := newTestSession(t, Options{})
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client})
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	firstResult := make(chan struct {
 		answer string
@@ -784,8 +791,8 @@ func TestManagerCapsSessionCount(t *testing.T) {
 
 func TestRunnerUpdatesLastUsed(t *testing.T) {
 	client := &stubProvider{turns: []stubTurn{{result: &provider.TurnResult{Text: "done"}}}}
-	session := newTestSession(t, Options{})
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client})
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	before := time.Now()
 	if _, err := runner.Run(context.Background(), session, "finish the task"); err != nil {
@@ -802,8 +809,8 @@ func TestRunnerClientErrorPreservesSessionAndUnlocks(t *testing.T) {
 		{result: &provider.TurnResult{Text: "recovered"}},
 	}}
 	emitter := &recEmitter{}
-	session := newTestSession(t, Options{})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client})
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "first prompt"); err == nil || err.Error() != "upstream failed" {
 		t.Fatalf("first Run() error = %v", err)
@@ -837,8 +844,8 @@ func TestRunnerEmitsDeltasAndUsageInOrder(t *testing.T) {
 		deltas: []string{"do", "ne"},
 	}}}
 	emitter := &recEmitter{}
-	session := newTestSession(t, Options{})
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: &stubApprover{}}
+	session := newTestSession(t, Options{Provider: client})
+	runner := &Runner{Emitter: emitter, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "stream"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -933,8 +940,9 @@ func runPatchOnce(t *testing.T, options Options, approver *stubApprover, patchTe
 		{result: &provider.TurnResult{Text: "done"}},
 	}}
 	emitter := &recEmitter{}
+	options.Provider = client
 	session := newTestSession(t, options)
-	runner := &Runner{Provider: client, Emitter: emitter, Approver: approver}
+	runner := &Runner{Emitter: emitter, Approver: approver}
 	if _, err := runner.Run(context.Background(), session, "patch it"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -1107,8 +1115,9 @@ func runShellOnce(t *testing.T, options Options, approver *stubApprover, command
 		{result: &provider.TurnResult{ToolCalls: []provider.ToolCall{call}}},
 		{result: &provider.TurnResult{Text: "done"}},
 	}}
+	options.Provider = client
 	session := newTestSession(t, options)
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: approver}
+	runner := &Runner{Emitter: &recEmitter{}, Approver: approver}
 	if _, err := runner.Run(context.Background(), session, "run it"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}

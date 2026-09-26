@@ -74,9 +74,10 @@ func newRig(
 	if o.Cwd == "" {
 		o.Cwd = t.TempDir()
 	}
+	o.Provider = p
 	session := agent.NewManager().Create(o)
 	emitter := &recEmitter{}
-	runner := &agent.Runner{Provider: p, Emitter: emitter, Approver: stubApprover(approve)}
+	runner := &agent.Runner{Emitter: emitter, Approver: stubApprover(approve)}
 	return runner, session, emitter, fake
 }
 

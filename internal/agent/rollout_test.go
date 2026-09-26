@@ -65,10 +65,10 @@ func TestRunnerWritesRollout(t *testing.T) {
 		{result: &provider.TurnResult{Reasoning: "plan", Text: "working", ToolCalls: []provider.ToolCall{shell, applyPatch}, Usage: usage}},
 		{result: &provider.TurnResult{Text: "all done", Usage: usage}},
 	}}
-	session := newTestSession(t, Options{Sandbox: "danger-full-access", ReasoningEffort: "xhigh", EffortSent: "max"})
+	session := newTestSession(t, Options{Provider: client, Sandbox: "danger-full-access", ReasoningEffort: "xhigh", EffortSent: "max"})
 	recorder := rollout.Open(session.ID, time.Now())
 	session.AttachRollout(recorder)
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "do it"); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -121,10 +121,10 @@ func TestRunnerRolloutRecordsError(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("SUBAGENT_MCP_ROLLOUT", "")
 	client := &stubProvider{}
-	session := newTestSession(t, Options{})
+	session := newTestSession(t, Options{Provider: client})
 	recorder := rollout.Open(session.ID, time.Now())
 	session.AttachRollout(recorder)
-	runner := &Runner{Provider: client, Emitter: &recEmitter{}, Approver: &stubApprover{}}
+	runner := &Runner{Emitter: &recEmitter{}, Approver: &stubApprover{}}
 
 	if _, err := runner.Run(context.Background(), session, "fail"); err == nil {
 		t.Fatalf("Run() error = nil, want error")

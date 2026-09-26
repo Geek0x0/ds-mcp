@@ -115,7 +115,7 @@ subagent-mcp --check-config [path]
 subagent-mcp --check-config --live [path]
 ```
 
-The optional `path` defaults to `$SUBAGENT_MCP_CONFIG` or `~/.config/subagent-mcp/config.toml`. Flags must come before the path. The process exits 0 when no provider failed and 1 otherwise; a missing config, unknown TOML key, or invalid field is reported naming the path or field, and a missing key is always skipped — the overall result fails only when no configured provider has a key set, or a reachability/model check actually failed. Output looks like:
+The optional `path` defaults to `$SUBAGENT_MCP_CONFIG` or `~/.config/subagent-mcp/config.toml`. Flags must come before the path. The process exits 0 unless a provider check actually failed or no configured provider has a key set; a missing config, unknown TOML key, or invalid field is reported naming the path or field, and a missing key is always skipped — the overall result fails only when no configured provider has a key set, or a reachability/model check actually failed. Output looks like:
 
 ```
 config   /home/you/.config/subagent-mcp/config.toml   OK

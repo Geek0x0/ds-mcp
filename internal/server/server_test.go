@@ -134,32 +134,40 @@ func (s *fakeElicitationSession) RequestElicitation(
 const testProviderAPI = "test-stub"
 
 var (
-	testStubsMu sync.Mutex
-	testStubs   = map[string]provider.Provider{}
+	testStubsMu  sync.Mutex
+	testStubs    = map[string]provider.Provider{}
+	testStubNext int
 )
 
 func init() {
-	provider.Register(testProviderAPI, func(name string, _ config.Provider, _ string) (provider.Provider, error) {
+	provider.Register(testProviderAPI, func(_ string, cfg config.Provider, _ string) (provider.Provider, error) {
 		testStubsMu.Lock()
 		defer testStubsMu.Unlock()
-		p, ok := testStubs[name]
+		p, ok := testStubs[cfg.BaseURL]
 		if !ok {
-			return nil, fmt.Errorf("no test stub registered for provider %q", name)
+			return nil, fmt.Errorf("no test stub registered for key %q", cfg.BaseURL)
 		}
 		return p, nil
 	})
 }
 
-func registerTestStub(t *testing.T, name string, p provider.Provider) {
+// registerTestStub registers p under a key unique to this call, so two
+// providers reusing the same display name across different tests — or a
+// subtest and its parent — can never collide or clobber each other's
+// registration. Returns the key to store in that provider's config.Provider.BaseURL.
+func registerTestStub(t *testing.T, p provider.Provider) string {
 	t.Helper()
 	testStubsMu.Lock()
-	testStubs[name] = p
+	testStubNext++
+	key := fmt.Sprintf("test-stub://%d", testStubNext)
+	testStubs[key] = p
 	testStubsMu.Unlock()
 	t.Cleanup(func() {
 		testStubsMu.Lock()
-		delete(testStubs, name)
+		delete(testStubs, key)
 		testStubsMu.Unlock()
 	})
+	return key
 }
 
 // testConfig returns a single-provider config named "deepseek", backed by
@@ -180,11 +188,12 @@ func testMultiConfig(t *testing.T, providers map[string]provider.Provider) *conf
 	t.Helper()
 	cfg := &config.Config{Providers: map[string]config.Provider{}}
 	for name, client := range providers {
-		registerTestStub(t, name, client)
+		key := registerTestStub(t, client)
 		envKey := "TEST_STUB_KEY_" + strings.ToUpper(name)
 		t.Setenv(envKey, "test-key-"+name)
 		cfg.Providers[name] = config.Provider{
 			API:          testProviderAPI,
+			BaseURL:      key,
 			EnvKey:       envKey,
 			DefaultModel: "m-fast",
 			Models:       []config.Model{{ID: "m-fast", Description: "fast"}, {ID: "m-pro"}},
@@ -1527,21 +1536,22 @@ func TestProviderOmittedWithSingleProviderConfigured(t *testing.T) {
 }
 
 func TestProviderRequiredWithMultipleConfigured(t *testing.T) {
-	clientA := &stubProvider{name: "a"}
-	clientB := &stubProvider{name: "b"}
-	s := New(testMultiConfig(t, map[string]provider.Provider{"a": clientA, "b": clientB}), "test")
+	clientAlpha := &stubProvider{name: "alpha"}
+	clientBravo := &stubProvider{name: "bravo"}
+	s := New(testMultiConfig(t, map[string]provider.Provider{"alpha": clientAlpha, "bravo": clientBravo}), "test")
 	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{"prompt": "hi", "cwd": t.TempDir()}))
 	if err != nil || !result.IsError {
 		t.Fatalf("handleStart() = (%#v, %v), want a tool error", result, err)
 	}
 	text := toolResultText(t, result)
-	for _, want := range []string{"provider is required", "a", "b"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("error %q lacks %q", text, want)
-		}
+	if !strings.Contains(text, "provider is required") {
+		t.Errorf("error %q lacks %q", text, "provider is required")
 	}
-	if len(clientA.recordedRequests()) != 0 || len(clientB.recordedRequests()) != 0 {
-		t.Fatalf("no provider should have been called: a=%d b=%d", len(clientA.recordedRequests()), len(clientB.recordedRequests()))
+	if !strings.HasSuffix(text, "available: alpha, bravo") {
+		t.Errorf("error %q, want it to end with %q", text, "available: alpha, bravo")
+	}
+	if len(clientAlpha.recordedRequests()) != 0 || len(clientBravo.recordedRequests()) != 0 {
+		t.Fatalf("no provider should have been called: alpha=%d bravo=%d", len(clientAlpha.recordedRequests()), len(clientBravo.recordedRequests()))
 	}
 }
 
@@ -1603,20 +1613,82 @@ func TestProviderMissingKeyFailsOnlyThatCall(t *testing.T) {
 	}
 }
 
-func TestModelParameterUnionAcrossProviders(t *testing.T) {
+func TestModelAndEffortAreIsolatedPerProvider(t *testing.T) {
+	clientAlpha := &stubProvider{name: "alpha", turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
+	clientBravo := &stubProvider{name: "bravo", turns: []stubTurn{{result: &provider.TurnResult{Text: "ok"}}}}
+	keyAlpha := registerTestStub(t, clientAlpha)
+	keyBravo := registerTestStub(t, clientBravo)
+	t.Setenv("TEST_ISOLATION_KEY_ALPHA", "k")
+	t.Setenv("TEST_ISOLATION_KEY_BRAVO", "k")
 	cfg := &config.Config{Providers: map[string]config.Provider{
-		"a": {API: testProviderAPI, EnvKey: "TEST_STUB_KEY_A", DefaultModel: "a-model", Models: []config.Model{{ID: "a-model"}}},
-		"b": {API: testProviderAPI, EnvKey: "TEST_STUB_KEY_B", DefaultModel: "b-model", Models: []config.Model{{ID: "b-model", Description: "strong"}}},
+		"alpha": {
+			API: testProviderAPI, BaseURL: keyAlpha, EnvKey: "TEST_ISOLATION_KEY_ALPHA",
+			DefaultModel: "m-fast", Models: []config.Model{{ID: "m-fast"}, {ID: "m-pro"}},
+			EffortMap: map[string]string{"xhigh": "max"},
+		},
+		"bravo": {
+			API: testProviderAPI, BaseURL: keyBravo, EnvKey: "TEST_ISOLATION_KEY_BRAVO",
+			DefaultModel: "b-only", Models: []config.Model{{ID: "b-only"}},
+			EffortMap: map[string]string{"xhigh": "low"},
+		},
 	}}
-	registerTestStub(t, "a", &stubProvider{name: "a"})
-	registerTestStub(t, "b", &stubProvider{name: "b"})
+	s := New(cfg, "test")
+
+	// A model that only exists on bravo must be rejected against alpha, and
+	// the error must list only alpha's models, never the global union.
+	result, err := s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
+		"prompt": "hi", "cwd": t.TempDir(), "provider": "alpha", "model": "b-only",
+	}))
+	if err != nil || !result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want a tool error", result, err)
+	}
+	if text := toolResultText(t, result); !strings.HasSuffix(text, "available models: m-fast, m-pro") {
+		t.Errorf("error %q, want it to end with alpha's models only", text)
+	}
+
+	// bravo's own default model and effort_map must be used, not alpha's.
+	result, err = s.handleStart(context.Background(), callToolRequest("subagent", map[string]any{
+		"prompt": "hi", "cwd": t.TempDir(), "provider": "bravo", "reasoning-effort": "xhigh",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("handleStart() = (%#v, %v), want success", result, err)
+	}
+	requests := clientBravo.recordedRequests()
+	if len(requests) != 1 || requests[0].Model != "b-only" || requests[0].Effort != "low" {
+		t.Fatalf("bravo request = %#v, want Model=%q Effort=%q", requests, "b-only", "low")
+	}
+	if len(clientAlpha.recordedRequests()) != 0 {
+		t.Fatalf("alpha must not have been called")
+	}
+}
+
+func TestModelParameterUnionAcrossProviders(t *testing.T) {
+	keyA := registerTestStub(t, &stubProvider{name: "a"})
+	keyB := registerTestStub(t, &stubProvider{name: "b"})
 	t.Setenv("TEST_STUB_KEY_A", "k")
 	t.Setenv("TEST_STUB_KEY_B", "k")
+	cfg := &config.Config{Providers: map[string]config.Provider{
+		"a": {
+			API: testProviderAPI, BaseURL: keyA, EnvKey: "TEST_STUB_KEY_A",
+			DefaultModel: "a-model", Models: []config.Model{{ID: "a-model"}, {ID: "shared-model"}},
+		},
+		"b": {
+			API: testProviderAPI, BaseURL: keyB, EnvKey: "TEST_STUB_KEY_B",
+			DefaultModel: "b-model", Models: []config.Model{{ID: "b-model", Description: "strong"}, {ID: "shared-model"}},
+		},
+	}}
 	s := New(cfg, "test")
 	schema := toolInputSchemaJSON(t, s, "subagent")
-	for _, want := range []string{`"a-model"`, `"b-model"`, "a (default a-model): a-model", "b (default b-model): b-model (strong)"} {
+	for _, want := range []string{
+		`"a-model"`, `"b-model"`, `"shared-model"`,
+		"a (default a-model): a-model", "b (default b-model): b-model (strong)",
+		`"enum":["a","b"]`,
+	} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("schema %s lacks %q", schema, want)
 		}
+	}
+	if got := strings.Count(schema, `"shared-model"`); got != 1 {
+		t.Errorf("shared-model appears %d times in the model enum, want exactly 1 (deduplicated)", got)
 	}
 }

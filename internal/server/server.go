@@ -156,7 +156,7 @@ func modelUnionSchema(cfg *config.Config) (ids []string, description string) {
 				models = append(models, fmt.Sprintf("%s (%s)", model.ID, model.Description))
 			}
 		}
-		groups = append(groups, fmt.Sprintf("%s: %s", name, strings.Join(models, ", ")))
+		groups = append(groups, fmt.Sprintf("%s (default %s): %s", name, p.DefaultModel, strings.Join(models, ", ")))
 	}
 	description = fmt.Sprintf(
 		"Model to use; the available id depends on the chosen provider. By provider: %s",
@@ -411,6 +411,50 @@ func replyTool(baseName string) mcp.Tool {
 	)
 }
 
+// resolveProvider picks the provider named by the "provider" argument, or the
+// sole configured provider when none is given, and constructs its adapter.
+// The third return value is a ready-to-return tool-error result, non-nil
+// exactly when resolution failed for any reason; callers should return it
+// immediately (with a nil Go error) when non-nil.
+func (s *Server) resolveProvider(arguments map[string]any) (config.Provider, provider.Provider, *mcp.CallToolResult) {
+	var providerArg string
+	if raw, present := arguments["provider"]; present {
+		var ok bool
+		providerArg, ok = raw.(string)
+		if !ok {
+			return config.Provider{}, nil, mcp.NewToolResultError(`argument "provider" must be a string`)
+		}
+	}
+	var providerName string
+	var providerCfg config.Provider
+	switch {
+	case providerArg != "":
+		cfg, err := s.cfg.Provider(providerArg)
+		if err != nil {
+			return config.Provider{}, nil, mcp.NewToolResultError(err.Error())
+		}
+		providerName, providerCfg = providerArg, cfg
+	case len(s.cfg.Providers) == 1:
+		for name, p := range s.cfg.Providers {
+			providerName, providerCfg = name, p
+		}
+	default:
+		return config.Provider{}, nil, mcp.NewToolResultError(fmt.Sprintf(
+			"provider is required when more than one is configured; available: %s",
+			strings.Join(s.cfg.ProviderNames(), ", "),
+		))
+	}
+	key, err := s.cfg.APIKeyFor(providerName)
+	if err != nil {
+		return config.Provider{}, nil, mcp.NewToolResultError(err.Error())
+	}
+	adapter, err := provider.New(providerName, providerCfg, key)
+	if err != nil {
+		return config.Provider{}, nil, mcp.NewToolResultError(err.Error())
+	}
+	return providerCfg, adapter, nil
+}
+
 func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ctx, endCall := s.beginCall(ctx, req)
 	defer endCall()
@@ -421,41 +465,9 @@ func (s *Server) handleStart(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 	arguments := req.GetArguments()
 
-	var providerArg string
-	if raw, present := arguments["provider"]; present {
-		var ok bool
-		providerArg, ok = raw.(string)
-		if !ok {
-			return mcp.NewToolResultError(`argument "provider" must be a string`), nil
-		}
-	}
-	var providerName string
-	var providerCfg config.Provider
-	switch {
-	case providerArg != "":
-		var err error
-		providerCfg, err = s.cfg.Provider(providerArg)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		providerName = providerArg
-	case len(s.cfg.Providers) == 1:
-		for name, p := range s.cfg.Providers {
-			providerName, providerCfg = name, p
-		}
-	default:
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"provider is required when more than one is configured; available: %s",
-			strings.Join(s.cfg.ProviderNames(), ", "),
-		)), nil
-	}
-	key, err := s.cfg.APIKeyFor(providerName)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	selectedProvider, err := provider.New(providerName, providerCfg, key)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+	providerCfg, selectedProvider, errResult := s.resolveProvider(arguments)
+	if errResult != nil {
+		return errResult, nil
 	}
 
 	sandboxValue := req.GetString("sandbox", "read-only")

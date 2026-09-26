@@ -456,7 +456,7 @@ func toolInputSchemaJSON(t *testing.T, s *Server, name string) string {
 func TestModelParameterFromConfig(t *testing.T) {
 	s := New(testConfig(t, &stubProvider{}), "test")
 	schema := toolInputSchemaJSON(t, s, "subagent")
-	for _, want := range []string{`"m-fast"`, `"m-pro"`, "deepseek: m-fast", "m-fast (fast)"} {
+	for _, want := range []string{`"m-fast"`, `"m-pro"`, "deepseek (default m-fast): m-fast", "m-fast (fast)"} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("schema %s lacks %q", schema, want)
 		}
@@ -1614,7 +1614,7 @@ func TestModelParameterUnionAcrossProviders(t *testing.T) {
 	t.Setenv("TEST_STUB_KEY_B", "k")
 	s := New(cfg, "test")
 	schema := toolInputSchemaJSON(t, s, "subagent")
-	for _, want := range []string{`"a-model"`, `"b-model"`, "a: a-model", "b: b-model (strong)"} {
+	for _, want := range []string{`"a-model"`, `"b-model"`, "a (default a-model): a-model", "b (default b-model): b-model (strong)"} {
 		if !strings.Contains(schema, want) {
 			t.Errorf("schema %s lacks %q", schema, want)
 		}

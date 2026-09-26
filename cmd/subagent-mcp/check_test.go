@@ -76,7 +76,6 @@ func TestRunCheckAllProvidersHealthy(t *testing.T) {
 	messages.SetModels([]string{"claude-sonnet-5"})
 
 	cfg := &config.Config{
-		ActiveProvider: "deepseek",
 		Providers: map[string]config.Provider{
 			"deepseek": chatProvider(chat.URL, checkKeyA, "deepseek-flash", "deepseek-flash", "deepseek-v4-pro"),
 			"anthropic": {
@@ -97,7 +96,7 @@ func TestRunCheckAllProvidersHealthy(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"provider anthropic (messages)",
-		"provider deepseek (chat-completions, active)",
+		"provider deepseek (chat-completions)",
 		"  key    " + checkKeyA + "   set",
 		"  api    " + chat.URL + "   OK (2 models listed)",
 		"  model  deepseek-flash     OK",
@@ -117,12 +116,11 @@ func TestRunCheckAllProvidersHealthy(t *testing.T) {
 	assertNoKeyLeak(t, got, checkKeyValueA, checkKeyValueB)
 }
 
-func TestRunCheckActiveProviderKeyUnsetFails(t *testing.T) {
+func TestRunCheckAllKeysUnsetFails(t *testing.T) {
 	t.Setenv(checkKeyA, "")
 	t.Setenv(checkKeyB, "")
 
 	cfg := &config.Config{
-		ActiveProvider: "deepseek",
 		Providers: map[string]config.Provider{
 			"deepseek": chatProvider("https://api.deepseek.invalid", checkKeyA, "deepseek-flash", "deepseek-flash"),
 			"openai": {
@@ -141,16 +139,13 @@ func TestRunCheckActiveProviderKeyUnsetFails(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"  key    " + checkKeyA + "   not set\n",
+		"  key    " + checkKeyA + "   not set, skipped",
 		"  key    " + checkKeyB + "   not set, skipped",
-		"result   FAIL (0 checked, 1 skipped, 1 failed)",
+		"result   FAIL (0 checked, 2 skipped, 0 failed) — no configured provider has its key set",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("runCheck() output missing %q:\n%s", want, got)
 		}
-	}
-	if strings.Contains(got, checkKeyA+"   not set, skipped") {
-		t.Errorf("active provider's missing key must not be reported as skipped:\n%s", got)
 	}
 	if strings.Contains(got, "  api    ") {
 		t.Errorf("runCheck() contacted a provider with no key:\n%s", got)
@@ -165,7 +160,6 @@ func TestRunCheckSkippedProviderDoesNotFail(t *testing.T) {
 	chat.SetModels([]string{"deepseek-flash"})
 
 	cfg := &config.Config{
-		ActiveProvider: "deepseek",
 		Providers: map[string]config.Provider{
 			"deepseek": chatProvider(chat.URL, checkKeyA, "deepseek-flash", "deepseek-flash"),
 			"anthropic": {
@@ -199,7 +193,6 @@ func TestRunCheckModelListingFailureSkipsLive(t *testing.T) {
 	chat.SetModelsStatus(http.StatusUnauthorized)
 
 	cfg := &config.Config{
-		ActiveProvider: "deepseek",
 		Providers: map[string]config.Provider{
 			"deepseek": chatProvider(chat.URL, checkKeyA, "deepseek-flash", "deepseek-flash"),
 		},
@@ -236,7 +229,6 @@ func TestRunCheckMissingModelWarnsOnly(t *testing.T) {
 	chat.SetModels([]string{"deepseek-flash"})
 
 	cfg := &config.Config{
-		ActiveProvider: "deepseek",
 		Providers: map[string]config.Provider{
 			"deepseek": chatProvider(chat.URL, checkKeyA, "deepseek-flash", "deepseek-flash", "deepseek-v4-pro"),
 		},
@@ -272,7 +264,6 @@ func TestRunCheckLiveRoundTripSucceeds(t *testing.T) {
 	chat.SetModels([]string{"deepseek-flash"})
 
 	cfg := &config.Config{
-		ActiveProvider: "deepseek",
 		Providers: map[string]config.Provider{
 			"deepseek": chatProvider(chat.URL, checkKeyA, "deepseek-flash", "deepseek-flash"),
 		},
@@ -302,7 +293,6 @@ func TestRunCheckWithoutModelLister(t *testing.T) {
 	t.Setenv(checkKeyA, checkKeyValueA)
 
 	cfg := &config.Config{
-		ActiveProvider: "custom",
 		Providers: map[string]config.Provider{
 			"custom": {
 				API:          "check-no-lister",
@@ -335,7 +325,6 @@ func TestRunCheckLiveWithoutModelLister(t *testing.T) {
 	t.Setenv(checkKeyA, checkKeyValueA)
 
 	cfg := &config.Config{
-		ActiveProvider: "custom",
 		Providers: map[string]config.Provider{
 			"custom": {
 				API:          "check-no-lister",

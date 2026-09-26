@@ -35,6 +35,7 @@ var checkTool = provider.ToolSpec{
 // optionally performing one real minimal tool-call round trip per reachable
 // provider when live is true. It writes human-readable lines to w, never any
 // key value, and returns the process exit code: 1 when any provider failed.
+// It also fails when no configured provider has a key set.
 func runCheck(w io.Writer, cfg *config.Config, live bool) int {
 	if live {
 		fmt.Fprintln(w, "--live will make real, billed API calls to each configured provider.")
@@ -49,22 +50,12 @@ func runCheck(w io.Writer, cfg *config.Config, live bool) int {
 	checked, skipped, failed := 0, 0, 0
 	for _, name := range names {
 		p := cfg.Providers[name]
-		active := name == cfg.ActiveProvider
-		if active {
-			fmt.Fprintf(w, "provider %s (%s, active)\n", name, p.API)
-		} else {
-			fmt.Fprintf(w, "provider %s (%s)\n", name, p.API)
-		}
+		fmt.Fprintf(w, "provider %s (%s)\n", name, p.API)
 
 		key := os.Getenv(p.EnvKey)
 		if key == "" {
-			if active {
-				fmt.Fprintf(w, "  key    %s   not set\n", p.EnvKey)
-				failed++
-			} else {
-				fmt.Fprintf(w, "  key    %s   not set, skipped\n", p.EnvKey)
-				skipped++
-			}
+			fmt.Fprintf(w, "  key    %s   not set, skipped\n", p.EnvKey)
+			skipped++
 			continue
 		}
 		fmt.Fprintf(w, "  key    %s   set\n", p.EnvKey)
@@ -119,11 +110,16 @@ func runCheck(w io.Writer, cfg *config.Config, live bool) int {
 	}
 
 	status := "PASS"
-	if failed > 0 {
+	reason := ""
+	switch {
+	case checked == 0:
+		status = "FAIL"
+		reason = " — no configured provider has its key set"
+	case failed > 0:
 		status = "FAIL"
 	}
-	fmt.Fprintf(w, "result   %s (%d checked, %d skipped, %d failed)\n", status, checked, skipped, failed)
-	if failed > 0 {
+	fmt.Fprintf(w, "result   %s (%d checked, %d skipped, %d failed)%s\n", status, checked, skipped, failed, reason)
+	if status == "FAIL" {
 		return 1
 	}
 	return 0

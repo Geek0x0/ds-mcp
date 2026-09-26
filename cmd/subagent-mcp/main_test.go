@@ -23,8 +23,6 @@ const (
 	checkMainValueKey = "sk-check-child-secret"
 
 	validTestConfig = `
-active_provider = "test"
-
 [providers.test]
 api = "chat-completions"
 env_key = "SUBAGENT_TEST_API_KEY"
@@ -47,15 +45,17 @@ func TestMainMissingConfigFile(t *testing.T) {
 	}
 }
 
-func TestMainRequiresActiveProviderKey(t *testing.T) {
+func TestMainStartsWithoutAnyProviderKeySet(t *testing.T) {
 	if runMainChild(t) {
 		return
 	}
 
 	path := writeConfigFile(t, validTestConfig)
-	output := runMainExpectingFailure(t, "SUBAGENT_MCP_CONFIG="+path)
-	if !strings.Contains(output, testEnvKey) {
-		t.Fatalf("main() failure output = %q, want it to name %q", output, testEnvKey)
+	cmd := newMainChildCommand(t)
+	cmd.Env = append(cmd.Env, "SUBAGENT_MCP_CONFIG="+path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("main() with no provider key set failed to start: %v; output:\n%s", err, output)
 	}
 }
 
@@ -100,8 +100,6 @@ func TestMainCheckConfigOK(t *testing.T) {
 	fake := testutil.NewFakeChat(t, nil)
 	fake.SetModels([]string{"test-model"})
 	contents := fmt.Sprintf(`
-active_provider = "test"
-
 [providers.test]
 api = "chat-completions"
 base_url = %q
@@ -125,7 +123,7 @@ models = [{ id = "test-model" }]
 		"config",
 		"OK",
 		path,
-		"provider test (chat-completions, active)",
+		"provider test (chat-completions)",
 		"result   PASS (1 checked, 0 skipped, 0 failed)",
 	} {
 		if !strings.Contains(output, want) {

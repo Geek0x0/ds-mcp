@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"github.com/Geek0x0/subagent-mcp/internal/config"
-	"github.com/Geek0x0/subagent-mcp/internal/provider"
 	_ "github.com/Geek0x0/subagent-mcp/internal/provider/chatcompletions"
 	_ "github.com/Geek0x0/subagent-mcp/internal/provider/messages"
 	_ "github.com/Geek0x0/subagent-mcp/internal/provider/responses"
@@ -16,7 +15,7 @@ import (
 	"github.com/Geek0x0/subagent-mcp/internal/tools"
 )
 
-const version = "0.7.0"
+const version = "0.8.0"
 
 func main() {
 	sandbox.MaybeRunHelper()
@@ -55,15 +54,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	key, err := cfg.APIKey()
-	if err != nil {
-		log.Fatal(err)
-	}
-	name, active := cfg.Active()
-	p, err := provider.New(name, active, key)
-	if err != nil {
-		log.Fatal(err)
-	}
 	tools.SetScrubbedEnv(cfg.EnvKeys(), []string{"SUBAGENT_MCP_"})
 	tools.SetProtectedFiles([]string{cfg.Path})
 
@@ -75,7 +65,7 @@ func main() {
 		options = append(options, dsserver.WithToolName(toolName))
 	}
 
-	if err := dsserver.New(p, active, version, options...).ServeStdio(); err != nil {
+	if err := dsserver.New(cfg, version, options...).ServeStdio(); err != nil {
 		log.Fatal(err)
 	}
 }
